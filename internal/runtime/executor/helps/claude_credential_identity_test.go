@@ -264,6 +264,7 @@ func TestClaudeNativeIdentityMatchesCredential(t *testing.T) {
 		{"case-aliased device", withIdentity(string(identity[:len(identity)-1]) + `,"DEVICE_ID":"` + strings.Repeat("b", 64) + `"}`), session, session, account, false},
 		{"case-aliased account", withIdentity(string(identity[:len(identity)-1]) + `,"ACCOUNT_UUID":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}`), session, session, account, false},
 		{"case-aliased session", withIdentity(string(identity[:len(identity)-1]) + `,"SESSION_ID":"99999999-2222-4333-8444-555555555555"}`), session, session, account, false},
+		{"Unicode case-aliased session", withIdentity(string(identity[:len(identity)-1]) + `,"ſession_id":"99999999-2222-4333-8444-555555555555"}`), session, session, account, false},
 		{"malformed exact device with valid alias", withIdentity(strings.Replace(string(identity[:len(identity)-1]), strings.Repeat("a", 64), "not-hex", 1) + `,"DEVICE_ID":"` + strings.Repeat("b", 64) + `"}`), session, session, account, false},
 		{"duplicate user_id", []byte(`{"metadata":{"user_id":` + fmt.Sprintf("%q", string(identity)) + `,"user_id":` + fmt.Sprintf("%q", string(identity)) + `}}`), session, session, account, false},
 		{"incoming mismatch", payload, "99999999-2222-4333-8444-555555555555", session, account, false},

@@ -229,8 +229,9 @@ func ClaudeNativeIdentityMatchesCredential(headers http.Header, payload []byte, 
 	unique := true
 	identity.ForEach(func(key, _ gjson.Result) bool {
 		// JSON struct decoding treats case aliases as core fields; native attribution must not be ambiguous.
-		lowerKey := strings.ToLower(key.String())
-		if lowerKey != key.String() && (lowerKey == "device_id" || lowerKey == "account_uuid" || lowerKey == "session_id") {
+		if (key.String() != "device_id" && strings.EqualFold(key.String(), "device_id")) ||
+			(key.String() != "account_uuid" && strings.EqualFold(key.String(), "account_uuid")) ||
+			(key.String() != "session_id" && strings.EqualFold(key.String(), "session_id")) {
 			unique = false
 			return false
 		}
