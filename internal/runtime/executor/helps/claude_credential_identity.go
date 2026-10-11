@@ -13,6 +13,7 @@ import (
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -210,6 +211,41 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 	}
 	claudeauth.StoreDeviceIDPool(&auth.Metadata, deviceIDs)
 	return deviceIDs, nil
+}
+
+// ClaudeNativeIdentityMatchesCredential keeps native attribution only when session and account agree.
+func ClaudeNativeIdentityMatchesCredential(headers http.Header, payload []byte, outboundSessionID string, auth *cliproxyauth.Auth) bool {
+	metadata, present, errMetadata := uniqueClaudeJSONObjectMember(payload, "metadata")
+	if errMetadata != nil || !present {
+		return false
+	}
+	userID, present, errUserID := uniqueClaudeJSONObjectMember(metadata, "user_id")
+	var encodedIdentity string
+	if errUserID != nil || !present || json.Unmarshal(userID, &encodedIdentity) != nil || !isValidUserID(encodedIdentity) {
+		return false
+	}
+	identity := gjson.Parse(encodedIdentity)
+	seen := make(map[string]bool)
+	unique := true
+	identity.ForEach(func(key, _ gjson.Result) bool {
+		// JSON struct decoding treats case aliases as core fields; native attribution must not be ambiguous.
+		if (key.String() != "device_id" && strings.EqualFold(key.String(), "device_id")) ||
+			(key.String() != "account_uuid" && strings.EqualFold(key.String(), "account_uuid")) ||
+			(key.String() != "session_id" && strings.EqualFold(key.String(), "session_id")) {
+			unique = false
+			return false
+		}
+		if seen[key.String()] {
+			unique = false
+			return false
+		}
+		seen[key.String()] = true
+		return true
+	})
+	accountUUID := ClaudeCredentialAccountUUID(auth)
+	return unique && outboundSessionID != "" && identity.Get("session_id").String() == outboundSessionID &&
+		headerValue(headers, ClaudeCodeSessionHeader) == outboundSessionID &&
+		accountUUID != "" && strings.EqualFold(identity.Get("account_uuid").String(), accountUUID)
 }
 
 // ClaudeCredentialAccountUUID returns the selected upstream credential's account UUID.

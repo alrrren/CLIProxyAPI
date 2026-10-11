@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -232,5 +233,56 @@ func TestApplyClaudeCredentialMetadataRequiresAccountUUID(t *testing.T) {
 	var requestErr cliproxyexecutor.RequestScopedError
 	if errors.As(errApply, &requestErr) && requestErr != nil && requestErr.IsRequestScoped() {
 		t.Fatalf("missing credential identity error = %T %v, want credential-scoped", errApply, errApply)
+	}
+}
+
+func TestClaudeNativeIdentityMatchesCredential(t *testing.T) {
+	const session = "11111111-2222-4333-8444-555555555555"
+	const account = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	identity := []byte(`{"device_id":"` + strings.Repeat("a", 64) + `","account_uuid":"` + account + `","session_id":"` + session + `"}`)
+	payload, _ := json.Marshal(map[string]any{"metadata": map[string]string{"user_id": string(identity)}})
+	withIdentity := func(raw string) []byte {
+		body, _ := json.Marshal(map[string]any{"metadata": map[string]string{"user_id": raw}})
+		return body
+	}
+	extraIdentity := `{"extra":{"tag":"native"},` + string(identity[1:])
+	duplicateCore := string(identity[:len(identity)-1]) + `,"session_id":"` + session + `"}`
+	duplicateExtra := `{"extra":1,"extra":2,` + string(identity[1:])
+	tests := []struct {
+		name            string
+		payload         []byte
+		headerSession   string
+		outboundSession string
+		account         string
+		want            bool
+	}{
+		{"matching", payload, session, session, account, true},
+		{"valid extra metadata", withIdentity(extraIdentity), session, session, account, true},
+		{"reordered core metadata", withIdentity(`{"session_id":"` + session + `","account_uuid":"` + account + `","device_id":"` + strings.Repeat("a", 64) + `"}`), session, session, account, true},
+		{"duplicate core field", withIdentity(duplicateCore), session, session, account, false},
+		{"duplicate extra field", withIdentity(duplicateExtra), session, session, account, false},
+		{"case-aliased device", withIdentity(string(identity[:len(identity)-1]) + `,"DEVICE_ID":"` + strings.Repeat("b", 64) + `"}`), session, session, account, false},
+		{"case-aliased account", withIdentity(string(identity[:len(identity)-1]) + `,"ACCOUNT_UUID":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}`), session, session, account, false},
+		{"case-aliased session", withIdentity(string(identity[:len(identity)-1]) + `,"SESSION_ID":"99999999-2222-4333-8444-555555555555"}`), session, session, account, false},
+		{"Unicode case-aliased session", withIdentity(string(identity[:len(identity)-1]) + `,"ſession_id":"99999999-2222-4333-8444-555555555555"}`), session, session, account, false},
+		{"malformed exact device with valid alias", withIdentity(strings.Replace(string(identity[:len(identity)-1]), strings.Repeat("a", 64), "not-hex", 1) + `,"DEVICE_ID":"` + strings.Repeat("b", 64) + `"}`), session, session, account, false},
+		{"duplicate user_id", []byte(`{"metadata":{"user_id":` + fmt.Sprintf("%q", string(identity)) + `,"user_id":` + fmt.Sprintf("%q", string(identity)) + `}}`), session, session, account, false},
+		{"incoming mismatch", payload, "99999999-2222-4333-8444-555555555555", session, account, false},
+		{"derived outbound", payload, session, "99999999-2222-4333-8444-555555555555", account, false},
+		{"missing outbound", payload, session, "", account, false},
+		{"different selected account", payload, session, session, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", false},
+		{"unknown selected account", payload, session, session, "", false},
+		{"empty caller account", bytes.Replace(payload, []byte(account), nil, 1), session, session, account, false},
+		{"malformed caller", []byte(`{"metadata":{"user_id":"bad"}}`), session, session, account, false},
+		{"duplicate metadata", append(append([]byte(`{"metadata":{},`), payload[1:len(payload)-1]...), '}'), session, session, account, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{Metadata: map[string]any{"account_uuid": tt.account}}
+			headers := http.Header{"X-Claude-Code-Session-Id": {tt.headerSession}}
+			if got := ClaudeNativeIdentityMatchesCredential(headers, tt.payload, tt.outboundSession, auth); got != tt.want {
+				t.Fatalf("preserve = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
