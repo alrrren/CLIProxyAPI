@@ -13,6 +13,7 @@ import (
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -210,6 +211,20 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 	}
 	claudeauth.StoreDeviceIDPool(&auth.Metadata, deviceIDs)
 	return deviceIDs, nil
+}
+
+// ClaudeNativeIdentityMatchesCredential keeps native attribution only when session and account agree.
+func ClaudeNativeIdentityMatchesCredential(headers http.Header, payload []byte, outboundSessionID string, auth *cliproxyauth.Auth) bool {
+	if _, present, errMetadata := uniqueClaudeJSONObjectMember(payload, "metadata"); errMetadata != nil || !present {
+		return false
+	}
+	if !measuredClaudeCodeHelperSessionMatches(headers, payload) {
+		return false
+	}
+	identity := gjson.GetBytes(payload, "metadata.user_id").String()
+	accountUUID := ClaudeCredentialAccountUUID(auth)
+	return outboundSessionID != "" && gjson.Get(identity, "session_id").String() == outboundSessionID &&
+		accountUUID != "" && strings.EqualFold(gjson.Get(identity, "account_uuid").String(), accountUUID)
 }
 
 // ClaudeCredentialAccountUUID returns the selected upstream credential's account UUID.

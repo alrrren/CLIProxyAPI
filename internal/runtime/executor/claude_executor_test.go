@@ -1273,11 +1273,8 @@ func TestClaudeExecutor_ConfirmedVSCodeOAuthPreservesToolNames(t *testing.T) {
 	if got := gjson.GetBytes(seenBody, "tools.1.name").String(); got != "search_web" {
 		t.Fatalf("tools.1.name = %q, want confirmed native unknown name preserved", got)
 	}
-	assertClaudeCredentialIdentity(t, seenBody, seenHeaders, deviceIDs, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	upstreamUserID := gjson.GetBytes(seenBody, "metadata.user_id").String()
-	if upstreamDeviceID := gjson.Get(upstreamUserID, "device_id").String(); upstreamDeviceID == strings.Repeat("c", 64) {
-		t.Fatalf("device_id = %q, want native device replaced by credential pool", upstreamDeviceID)
-	}
+	assertClaudeCredentialIdentity(t, seenBody, seenHeaders, deviceIDs, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 	if got := gjson.Get(upstreamUserID, "session_id").String(); got != "33333333-4444-4555-8666-777777777777" {
 		t.Fatalf("session_id = %q, want downstream agent session", got)
 	}
@@ -9795,5 +9792,106 @@ func TestClaudeExecutor_CloakModePrefersStoredPrevReqOverCallerFake(t *testing.T
 	}
 	if strings.Contains(turn2System, "req_fake_caller_999") {
 		t.Fatalf("CPA must not use fake caller cc_prev_req, got: %s", turn2System)
+	}
+}
+
+func TestClaudeExecutor_NativeOAuthPreservesIdentityAndCorrelation(t *testing.T) {
+	tests := []struct {
+		name     string
+		stream   bool
+		account  string
+		session  string
+		preserve bool
+	}{
+		{name: "non-stream", account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
+		{name: "stream", stream: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
+		{name: "switched account", account: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
+		{name: "stream switched account", stream: true, account: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
+		{name: "session mismatch", account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", session: "99999999-2222-4333-8444-555555555555"},
+		{name: "stream session mismatch", stream: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", session: "99999999-2222-4333-8444-555555555555"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seenBody []byte
+			var seenHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seenBody, _ = io.ReadAll(r.Body)
+				seenHeaders = r.Header.Clone()
+				if tt.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte("event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			const sessionID = "11111111-2222-4333-8444-555555555555"
+			const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"11111111-2222-4333-8444-555555555555"}`
+			payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"x"}],"metadata":{"user_id":` + fmt.Sprintf("%q", userID) + `}}`)
+			incoming := http.Header{
+				"User-Agent":                  {"claude-cli/2.1.280 (external, cli)"},
+				"X-App":                       {"cli"},
+				"X-Stainless-Package-Version": {"0.128.0"},
+				"Anthropic-Dispatch-Id":       {"native-dispatch"},
+				"X-Claude-Code-Prompt-Id":     {"native-prompt"},
+				"Anthropic-Beta":              {"claude-code-20250219"},
+				"X-Claude-Code-Session-Id":    {sessionID},
+			}
+			if tt.session != "" {
+				incoming.Set("X-Claude-Code-Session-Id", tt.session)
+			}
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Metadata: claudeOAuthTestMetadata(), Attributes: map[string]string{
+				"api_key":  "sk-ant-oat01-test-native-preservation",
+				"base_url": server.URL,
+			}}
+			auth.Metadata["account_uuid"] = tt.account
+			req := cliproxyexecutor.Request{Model: "claude-opus-4-6", Payload: payload}
+			opts := cliproxyexecutor.Options{
+				Stream:          tt.stream,
+				SourceFormat:    sdktranslator.FormatClaude,
+				OriginalRequest: payload,
+				Headers:         incoming,
+			}
+
+			if tt.stream {
+				result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			if got := gjson.GetBytes(seenBody, "metadata.user_id").String(); tt.preserve && got != userID {
+				t.Fatalf("native identity rewritten: got %q, want %q", got, userID)
+			}
+			if !tt.preserve {
+				assertClaudeCredentialIdentity(t, seenBody, seenHeaders, []string{strings.Repeat("0", 64)}, tt.account)
+				if gjson.GetBytes(seenBody, "metadata.user_id").String() == userID {
+					t.Fatal("unsafe caller identity preserved")
+				}
+			}
+			for _, name := range []string{"X-Stainless-Package-Version", "Anthropic-Dispatch-Id", "X-Claude-Code-Prompt-Id"} {
+				if got := seenHeaders.Get(name); got != incoming.Get(name) {
+					t.Errorf("native header %s = %q, want %q", name, got, incoming.Get(name))
+				}
+			}
+			content := gjson.GetBytes(seenBody, "messages.0.content")
+			if content.Type != gjson.String || content.String() != "x" {
+				t.Fatalf("messages.0.content = %s, want native string content preserved; body=%s", content.Raw, seenBody)
+			}
+			if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+				t.Fatalf("confirmed markerless native request received synthetic cache_control: %s", seenBody)
+			}
+		})
 	}
 }

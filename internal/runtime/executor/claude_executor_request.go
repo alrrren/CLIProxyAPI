@@ -1448,6 +1448,18 @@ func applyClaudeHeadersWithNativeProfile(
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, confirmedClaudeCode)
 	}
+	if confirmedClaudeCode && helps.DetectClaudeCodeRequest(incomingHeaders, body, countTokens, cfg).Confirmed {
+		for name, values := range incomingHeaders {
+			lowerName := strings.ToLower(name)
+			if strings.HasPrefix(lowerName, "x-stainless-") || lowerName == "user-agent" ||
+				lowerName == "anthropic-dispatch-id" || lowerName == "x-claude-code-prompt-id" {
+				r.Header.Del(name)
+				for _, value := range values {
+					r.Header.Add(name, value)
+				}
+			}
+		}
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
