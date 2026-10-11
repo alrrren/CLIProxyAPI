@@ -1,5 +1,5 @@
 const fs = require('fs'), vm = require('vm'), assert = require('assert');
-// User request: expected ten-minute readings stay valid; errors/resets remain visible.
+// User request: expected ten-minute readings stay valid; errors/resets remain visible; forecasts are labelled estimates.
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const script = html.split('<script>')[1].split('</script>')[0];
 new vm.Script(script);
@@ -17,9 +17,11 @@ quota={accounts:[{name:'Personal',provider:'claude',observed_at:new Date().toISO
 renderQuota();
 if(!$('quotaProblem').textContent.includes('failed')) throw Error('Missing visible provider failure');
 if($('poolWeek').textContent!=='—') throw Error('Failed reading included in weekly total');
+if($('outlookLeft').textContent!=='—'||!$('outlookChart').innerHTML.includes('Forecast unavailable')) throw Error('Forecast drawn from a failed reading');
 quota.accounts[0].quota_error=null; renderQuota();
 if($('poolWeek').textContent!=='0.70') throw Error('Recovered reading excluded');
+if($('outlookLeft').textContent!=='70%'||!$('outlookRate').textContent.endsWith('estimate')||!$('outlookNext').textContent.endsWith('estimate')||!$('outlookNote').textContent.includes('lasts until its reset')) throw Error('Outlook does not separate measured remaining from estimated pace');
 quotaError='Network unavailable';renderQuota();
 if(!$('quotaProblem').textContent.includes('Network unavailable')) throw Error('Network error hidden');
 `,context);
-console.log('PASS: UI syntax, scheduling grace, stale timeout, reset, provider failure, weekly exclusion/recovery, network error');
+console.log('PASS: UI syntax, scheduling grace, stale timeout, reset, provider failure, weekly exclusion/recovery, outlook measured vs estimate, network error');
