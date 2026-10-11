@@ -9804,7 +9804,10 @@ func TestClaudeExecutor_NativeOAuthPreservesIdentityAndCorrelation(t *testing.T)
 		preserve  bool
 		stabilize bool
 		extra     bool
+		override  bool
 	}{
+		{name: "payload override", override: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
+		{name: "stream payload override", stream: true, override: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
 		{name: "extra metadata", extra: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
 		{name: "stream extra metadata", stream: true, extra: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
 		{name: "non-stream", account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
@@ -9855,6 +9858,14 @@ func TestClaudeExecutor_NativeOAuthPreservesIdentityAndCorrelation(t *testing.T)
 			cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
 				StabilizeDeviceProfile: &tt.stabilize,
 			}}
+			expectedIdentity := userID
+			if tt.override {
+				expectedIdentity = strings.Replace(userID, strings.Repeat("a", 64), strings.Repeat("b", 64), 1)
+				cfg.Payload.Override = []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: "claude-opus-4-6"}},
+					Params: map[string]any{"metadata.user_id": expectedIdentity},
+				}}
+			}
 			executor := NewClaudeExecutor(cfg)
 			auth := &cliproxyauth.Auth{Metadata: claudeOAuthTestMetadata(), Attributes: map[string]string{
 				"api_key":  "sk-ant-oat01-test-native-preservation",
@@ -9883,8 +9894,8 @@ func TestClaudeExecutor_NativeOAuthPreservesIdentityAndCorrelation(t *testing.T)
 				t.Fatalf("Execute() error = %v", errExecute)
 			}
 
-			if got := gjson.GetBytes(seenBody, "metadata.user_id").String(); tt.preserve && got != userID {
-				t.Fatalf("native identity rewritten: got %q, want %q", got, userID)
+			if got := gjson.GetBytes(seenBody, "metadata.user_id").String(); tt.preserve && got != expectedIdentity {
+				t.Fatalf("native identity rewritten: got %q, want %q", got, expectedIdentity)
 			}
 			if !tt.preserve {
 				assertClaudeCredentialIdentity(t, seenBody, seenHeaders, []string{strings.Repeat("0", 64)}, tt.account)
