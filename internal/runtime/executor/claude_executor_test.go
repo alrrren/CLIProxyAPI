@@ -9803,7 +9803,10 @@ func TestClaudeExecutor_NativeOAuthPreservesIdentityAndCorrelation(t *testing.T)
 		session   string
 		preserve  bool
 		stabilize bool
+		extra     bool
 	}{
+		{name: "extra metadata", extra: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
+		{name: "stream extra metadata", stream: true, extra: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
 		{name: "non-stream", account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
 		{name: "stream", stream: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
 		{name: "stabilized non-stream", stabilize: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
@@ -9832,7 +9835,10 @@ func TestClaudeExecutor_NativeOAuthPreservesIdentityAndCorrelation(t *testing.T)
 			defer server.Close()
 
 			const sessionID = "11111111-2222-4333-8444-555555555555"
-			const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"11111111-2222-4333-8444-555555555555"}`
+			userID := `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"11111111-2222-4333-8444-555555555555"}`
+			if tt.extra {
+				userID = `{"extra":{"tag":"native"},` + userID[1:]
+			}
 			payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"x"}],"metadata":{"user_id":` + fmt.Sprintf("%q", userID) + `}}`)
 			incoming := http.Header{
 				"User-Agent":                  {"claude-cli/2.1.280 (external, cli)"},

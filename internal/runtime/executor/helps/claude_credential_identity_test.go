@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -240,6 +241,13 @@ func TestClaudeNativeIdentityMatchesCredential(t *testing.T) {
 	const account = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	identity := []byte(`{"device_id":"` + strings.Repeat("a", 64) + `","account_uuid":"` + account + `","session_id":"` + session + `"}`)
 	payload, _ := json.Marshal(map[string]any{"metadata": map[string]string{"user_id": string(identity)}})
+	withIdentity := func(raw string) []byte {
+		body, _ := json.Marshal(map[string]any{"metadata": map[string]string{"user_id": raw}})
+		return body
+	}
+	extraIdentity := `{"extra":{"tag":"native"},` + string(identity[1:])
+	duplicateCore := string(identity[:len(identity)-1]) + `,"session_id":"` + session + `"}`
+	duplicateExtra := `{"extra":1,"extra":2,` + string(identity[1:])
 	tests := []struct {
 		name            string
 		payload         []byte
@@ -249,6 +257,11 @@ func TestClaudeNativeIdentityMatchesCredential(t *testing.T) {
 		want            bool
 	}{
 		{"matching", payload, session, session, account, true},
+		{"valid extra metadata", withIdentity(extraIdentity), session, session, account, true},
+		{"reordered core metadata", withIdentity(`{"session_id":"` + session + `","account_uuid":"` + account + `","device_id":"` + strings.Repeat("a", 64) + `"}`), session, session, account, true},
+		{"duplicate core field", withIdentity(duplicateCore), session, session, account, false},
+		{"duplicate extra field", withIdentity(duplicateExtra), session, session, account, false},
+		{"duplicate user_id", []byte(`{"metadata":{"user_id":` + fmt.Sprintf("%q", string(identity)) + `,"user_id":` + fmt.Sprintf("%q", string(identity)) + `}}`), session, session, account, false},
 		{"incoming mismatch", payload, "99999999-2222-4333-8444-555555555555", session, account, false},
 		{"derived outbound", payload, session, "99999999-2222-4333-8444-555555555555", account, false},
 		{"missing outbound", payload, session, "", account, false},

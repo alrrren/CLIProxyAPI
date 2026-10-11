@@ -215,16 +215,30 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 
 // ClaudeNativeIdentityMatchesCredential keeps native attribution only when session and account agree.
 func ClaudeNativeIdentityMatchesCredential(headers http.Header, payload []byte, outboundSessionID string, auth *cliproxyauth.Auth) bool {
-	if _, present, errMetadata := uniqueClaudeJSONObjectMember(payload, "metadata"); errMetadata != nil || !present {
+	metadata, present, errMetadata := uniqueClaudeJSONObjectMember(payload, "metadata")
+	if errMetadata != nil || !present {
 		return false
 	}
-	if !measuredClaudeCodeHelperSessionMatches(headers, payload) {
+	userID, present, errUserID := uniqueClaudeJSONObjectMember(metadata, "user_id")
+	var encodedIdentity string
+	if errUserID != nil || !present || json.Unmarshal(userID, &encodedIdentity) != nil || !isValidUserID(encodedIdentity) {
 		return false
 	}
-	identity := gjson.GetBytes(payload, "metadata.user_id").String()
+	identity := gjson.Parse(encodedIdentity)
+	seen := make(map[string]bool)
+	unique := true
+	identity.ForEach(func(key, _ gjson.Result) bool {
+		if seen[key.String()] {
+			unique = false
+			return false
+		}
+		seen[key.String()] = true
+		return true
+	})
 	accountUUID := ClaudeCredentialAccountUUID(auth)
-	return outboundSessionID != "" && gjson.Get(identity, "session_id").String() == outboundSessionID &&
-		accountUUID != "" && strings.EqualFold(gjson.Get(identity, "account_uuid").String(), accountUUID)
+	return unique && outboundSessionID != "" && identity.Get("session_id").String() == outboundSessionID &&
+		headerValue(headers, ClaudeCodeSessionHeader) == outboundSessionID &&
+		accountUUID != "" && strings.EqualFold(identity.Get("account_uuid").String(), accountUUID)
 }
 
 // ClaudeCredentialAccountUUID returns the selected upstream credential's account UUID.
