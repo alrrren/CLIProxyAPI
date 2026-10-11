@@ -228,6 +228,12 @@ func ClaudeNativeIdentityMatchesCredential(headers http.Header, payload []byte, 
 	seen := make(map[string]bool)
 	unique := true
 	identity.ForEach(func(key, _ gjson.Result) bool {
+		// JSON struct decoding treats case aliases as core fields; native attribution must not be ambiguous.
+		lowerKey := strings.ToLower(key.String())
+		if lowerKey != key.String() && (lowerKey == "device_id" || lowerKey == "account_uuid" || lowerKey == "session_id") {
+			unique = false
+			return false
+		}
 		if seen[key.String()] {
 			unique = false
 			return false
