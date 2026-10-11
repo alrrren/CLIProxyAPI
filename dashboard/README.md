@@ -1,0 +1,42 @@
+# Pool dashboard
+
+Local quota and usage dashboard for this machine's CLIProxyAPI. It is not part of the
+CPA Go server; it reads CPA's runtime files read-only and serves `127.0.0.1:8320`.
+Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net:8321`.
+
+## Layout
+
+- Code (this directory): `server.py`, `ccusage_data.py`, `index.html`.
+- Runtime data (never in Git): `~/.config/cliproxyapi/` — `usage.sqlite3`,
+  `account-pool.json`, `collector-status.json`, `dashboard/build.json`,
+  `dashboard/ccusage-snapshots/`.
+- Live checkout: `~/.local/share/pool-dashboard-runtime`, a locked, detached Git worktree
+  pinned to a reviewed commit. Do not edit it in place; check out a new reviewed commit.
+- Service: LaunchAgent `com.aleks.cliproxyapi-dashboard` runs
+  `/opt/homebrew/bin/python3 ~/.local/share/pool-dashboard-runtime/dashboard/server.py`.
+
+## Checks
+
+```bash
+cd dashboard
+python3 -m unittest test_ccusage_data
+node check-ui.cjs
+node quota-ui-check.cjs index.html
+```
+
+## Deploy a reviewed commit
+
+```bash
+git -C ~/.local/share/pool-dashboard-runtime checkout --detach <sha>
+launchctl kickstart -k gui/$(id -u)/com.aleks.cliproxyapi-dashboard
+```
+
+## Roll back to the pre-Git source
+
+The original files remain in `~/.config/cliproxyapi/dashboard/`. Point the LaunchAgent's
+second `ProgramArguments` entry back to `/Users/aleks/.config/cliproxyapi/dashboard/server.py`, then:
+
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.aleks.cliproxyapi-dashboard.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aleks.cliproxyapi-dashboard.plist
+```

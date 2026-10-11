@@ -10,7 +10,8 @@ import tempfile
 import time
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-STORE = Path(__file__).with_name('ccusage-snapshots')
+# Runtime data stays in the config directory so the code can live in a Git checkout.
+STORE = Path.home() / '.config/cliproxyapi/dashboard/ccusage-snapshots'
 MACHINES = ('aleks-mbp', 'genius')
 ZONE = 'America/Mexico_City'
 COMMAND = ['daily', '--json', '--by-agent', '--offline', '--no-cost', '--timezone', ZONE]

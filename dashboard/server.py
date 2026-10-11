@@ -22,7 +22,7 @@ def upstream_status():
     with UPDATE_LOCK:
         if UPDATE_CACHE and time.monotonic() < UPDATE_CACHE['expires']:
             return UPDATE_CACHE['result']
-        build = json.loads(Path(__file__).with_name('build.json').read_text())
+        build = json.loads((ROOT / 'dashboard/build.json').read_text())
         result = dict(build, status='unknown', checked_at=datetime.now(ZONE).isoformat())
         try:
             def github(path):
