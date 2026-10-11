@@ -23,5 +23,6 @@ if($('poolWeek').textContent!=='0.70') throw Error('Recovered reading excluded')
 if($('outlookLeft').textContent!=='70%'||!$('outlookRate').textContent.endsWith('estimate')||!$('outlookNext').textContent.endsWith('estimate')||!$('outlookNote').textContent.includes('lasts until its reset')) throw Error('Outlook does not separate measured remaining from estimated pace');
 quotaError='Network unavailable';renderQuota();
 if(!$('quotaProblem').textContent.includes('Network unavailable')) throw Error('Network error hidden');
+if($('outlookLeft').textContent!=='—'||!$('outlookChart').innerHTML.includes('Forecast unavailable')) throw Error('Forecast drawn from cached data after a failed refresh');
 `,context);
 console.log('PASS: UI syntax, scheduling grace, stale timeout, reset, provider failure, weekly exclusion/recovery, outlook measured vs estimate, network error');
