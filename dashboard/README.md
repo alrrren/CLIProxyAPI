@@ -10,8 +10,10 @@ Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net
 - Runtime data (never in Git): `~/.config/cliproxyapi/` — `usage.sqlite3`,
   `account-pool.json`, `collector-status.json`, `dashboard/build.json`,
   `dashboard/ccusage-snapshots/`.
-- Live checkout: `~/.local/share/pool-dashboard-runtime`, a locked, detached Git worktree
-  pinned to a reviewed commit. Do not edit it in place; check out a new reviewed commit.
+- Live checkout: `~/.local/share/pool-dashboard-runtime`, a detached Git worktree pinned to a
+  reviewed commit. Its Git lock only stops it from being pruned or moved; the files stay
+  writable. Keeping it unedited is a convention: change it only by checking out a new
+  reviewed commit, never by editing files there.
 - Service: LaunchAgent `com.aleks.cliproxyapi-dashboard` runs
   `/opt/homebrew/bin/python3 ~/.local/share/pool-dashboard-runtime/dashboard/server.py`.
 

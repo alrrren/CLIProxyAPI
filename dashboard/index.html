@@ -132,8 +132,10 @@ const WEEK=604800000;
 // No quota history is stored, so pace is the average since the window began, assuming it opened 7 days before its reset.
 function pace(st,now){let elapsed=now-(st.reset-WEEK);return elapsed>=3600000?(1-st.left)/elapsed:null}
 let quotaProvider='', quotaView='remaining';
-function renderOutlook(on,now){let live=quotaError||quota.error?[]:on.map(a=>({a,st:windowState(a,a.seven_day,now)})).filter(x=>x.st.kind==='live');
+function renderOutlook(on,now){let live=on.map(a=>({a,st:windowState(a,a.seven_day,now)})).filter(x=>x.st.kind==='live');
 if(!live.length){$('outlookLeft').textContent='—';$('outlookOf').textContent='No current 7-day reading';$('outlookRate').textContent='';$('outlookNext').textContent='';$('outlookChart').innerHTML='<div class="empty">Forecast unavailable · it needs a fresh 7-day reading from at least one enabled account.</div>';$('outlookNote').textContent='';return}
+// A failed refresh keeps the last measured share visible but must not feed any estimate.
+if(quotaError||quota.error){$('outlookLeft').textContent=Math.round(live.reduce((n,x)=>n+x.st.left,0)*100)+'%';$('outlookOf').textContent='/ '+live.length*100+'% remaining · last measured';$('outlookRate').textContent='';$('outlookNext').textContent='';$('outlookChart').innerHTML='<div class="empty">Forecast paused · the latest quota refresh failed, so no estimate is drawn from older readings.</div>';$('outlookNote').textContent='';return}
 live.forEach(x=>x.rate=pace(x.st,now));let known=live.filter(x=>x.rate!=null),capacity=live.length,end=now+Number($('outlookHorizon').value||7)*86400000;
 // After its known reset an account restarts at 100% and drains at the same estimated pace; a 7-day horizon cannot hold a second reset.
 const at=t=>live.reduce((n,x)=>{let r=x.rate||0;return n+(t<x.st.reset?Math.max(0,x.st.left-(t-now)*r):Math.max(0,1-(t-x.st.reset)*r))},0);
