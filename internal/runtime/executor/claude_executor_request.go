@@ -1451,6 +1451,11 @@ func applyClaudeHeadersWithNativeProfile(
 	if confirmedClaudeCode && helps.DetectClaudeCodeRequest(incomingHeaders, body, countTokens, cfg).Confirmed {
 		for name, values := range incomingHeaders {
 			lowerName := strings.ToLower(name)
+			// The configured stabilized profile remains authoritative for its pinned fields.
+			if stabilizeDeviceProfile && (lowerName == "user-agent" || lowerName == "x-stainless-package-version" ||
+				lowerName == "x-stainless-runtime-version" || lowerName == "x-stainless-os" || lowerName == "x-stainless-arch") {
+				continue
+			}
 			if strings.HasPrefix(lowerName, "x-stainless-") || lowerName == "user-agent" ||
 				lowerName == "anthropic-dispatch-id" || lowerName == "x-claude-code-prompt-id" {
 				r.Header.Del(name)

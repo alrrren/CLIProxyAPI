@@ -9797,14 +9797,17 @@ func TestClaudeExecutor_CloakModePrefersStoredPrevReqOverCallerFake(t *testing.T
 
 func TestClaudeExecutor_NativeOAuthPreservesIdentityAndCorrelation(t *testing.T) {
 	tests := []struct {
-		name     string
-		stream   bool
-		account  string
-		session  string
-		preserve bool
+		name      string
+		stream    bool
+		account   string
+		session   string
+		preserve  bool
+		stabilize bool
 	}{
 		{name: "non-stream", account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
 		{name: "stream", stream: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
+		{name: "stabilized non-stream", stabilize: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
+		{name: "stabilized stream", stream: true, stabilize: true, account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", preserve: true},
 		{name: "switched account", account: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
 		{name: "stream switched account", stream: true, account: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
 		{name: "session mismatch", account: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", session: "99999999-2222-4333-8444-555555555555"},
@@ -9843,7 +9846,10 @@ func TestClaudeExecutor_NativeOAuthPreservesIdentityAndCorrelation(t *testing.T)
 			if tt.session != "" {
 				incoming.Set("X-Claude-Code-Session-Id", tt.session)
 			}
-			executor := NewClaudeExecutor(&config.Config{})
+			cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+				StabilizeDeviceProfile: &tt.stabilize,
+			}}
+			executor := NewClaudeExecutor(cfg)
 			auth := &cliproxyauth.Auth{Metadata: claudeOAuthTestMetadata(), Attributes: map[string]string{
 				"api_key":  "sk-ant-oat01-test-native-preservation",
 				"base_url": server.URL,
@@ -9880,7 +9886,12 @@ func TestClaudeExecutor_NativeOAuthPreservesIdentityAndCorrelation(t *testing.T)
 					t.Fatal("unsafe caller identity preserved")
 				}
 			}
-			for _, name := range []string{"X-Stainless-Package-Version", "Anthropic-Dispatch-Id", "X-Claude-Code-Prompt-Id"} {
+			if tt.stabilize {
+				assertClaudeFingerprint(t, seenHeaders, "claude-cli/2.1.280 (external, cli)", "0.112.1", "v26.3.0", "MacOS", "arm64")
+			} else if got := seenHeaders.Get("X-Stainless-Package-Version"); got != incoming.Get("X-Stainless-Package-Version") {
+				t.Errorf("native package version = %q, want %q", got, incoming.Get("X-Stainless-Package-Version"))
+			}
+			for _, name := range []string{"Anthropic-Dispatch-Id", "X-Claude-Code-Prompt-Id"} {
 				if got := seenHeaders.Get(name); got != incoming.Get(name) {
 					t.Errorf("native header %s = %q, want %q", name, got, incoming.Get(name))
 				}
