@@ -1,0 +1,4 @@
+# Runtime data and caches stay in ~/.config/cliproxyapi/dashboard, never in Git.
+__pycache__/
+ccusage-snapshots/
+build.json

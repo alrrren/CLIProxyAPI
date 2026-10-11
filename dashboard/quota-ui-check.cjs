@@ -1,0 +1,25 @@
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+// User request: expected ten-minute readings stay valid; errors/resets remain visible.
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const script = html.split('<script>')[1].split('</script>')[0];
+new vm.Script(script);
+const nodes = new Map();
+const document = {getElementById(id) { if(!nodes.has(id)) nodes.set(id, {classList: {toggle() {}}, textContent:'', innerHTML:'', addEventListener(){}}); return nodes.get(id)}};
+const context = vm.createContext({document, Intl, Date, console});
+vm.runInContext(script.split('const tick=')[0], context);
+vm.runInContext(`
+const testNow=Date.now(), testAccount={observed_at:new Date(testNow-620000).toISOString()}, testWindow={utilization:.3,resets_at:new Date(testNow+1000000).toISOString(),status:'allowed'};
+if(windowState(testAccount,testWindow,testNow).kind!=='live') throw Error('Expected reading became stale before eleven minutes');
+if(windowState({...testAccount, observed_at:new Date(testNow-660001).toISOString()},testWindow,testNow).kind!=='stale') throw Error('Overdue reading remained fresh');
+if(windowState({...testAccount,quota_error:'failed'},testWindow,testNow).kind!=='stale') throw Error('Provider error hidden by grace');
+if(windowState(testAccount,{...testWindow,resets_at:new Date(testNow).toISOString()},testNow).kind!=='expired') throw Error('Reset did not invalidate');
+quota={accounts:[{name:'Personal',provider:'claude',observed_at:new Date().toISOString(),quota_error:'failed',five_hour:testWindow,seven_day:testWindow}]};
+renderQuota();
+if(!$('quotaProblem').textContent.includes('failed')) throw Error('Missing visible provider failure');
+if($('poolWeek').textContent!=='—') throw Error('Failed reading included in weekly total');
+quota.accounts[0].quota_error=null; renderQuota();
+if($('poolWeek').textContent!=='0.70') throw Error('Recovered reading excluded');
+quotaError='Network unavailable';renderQuota();
+if(!$('quotaProblem').textContent.includes('Network unavailable')) throw Error('Network error hidden');
+`,context);
+console.log('PASS: UI syntax, scheduling grace, stale timeout, reset, provider failure, weekly exclusion/recovery, network error');
