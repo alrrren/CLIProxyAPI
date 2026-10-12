@@ -1,7 +1,8 @@
 # Pool dashboard
 
 Local quota and usage dashboard for this machine's CLIProxyAPI. It is not part of the
-CPA Go server; it reads CPA's runtime files read-only and serves `127.0.0.1:8320`.
+CPA Go server; the dashboard reads CPA's runtime files read-only and serves `127.0.0.1:8320`;
+the collector drains CPA's usage queue.
 Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net:8321`.
 
 ## Layout
@@ -10,6 +11,8 @@ Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net
 - Runtime data (never in Git): `~/.config/cliproxyapi/` — `usage.sqlite3`,
   `account-pool.json`, `collector-status.json`, `dashboard/build.json`,
   `dashboard/ccusage-snapshots/`, `dashboard/quota-history.sqlite3` (7-day quota readings, kept 8 days).
+- Unversioned runtime inputs: `connection-keys.json` (CPA management key, read by the collector) and
+  `account-pool.py` (run by the collector to refresh `account-pool.json`).
 - Network: besides the Genius pull, `/api/upstream` asks api.github.com every five minutes whether
   CPA has newer commits.
 - Live checkout: `~/.local/share/pool-dashboard-runtime`, a detached Git worktree pinned to a
@@ -18,7 +21,7 @@ Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net
   reviewed commit, never by editing files there.
 - Service: LaunchAgent `com.aleks.cliproxyapi-dashboard` runs
   `/opt/homebrew/bin/python3 ~/.local/share/pool-dashboard-runtime/dashboard/server.py`.
-  Its threads capture local ccusage (a full report hourly, the last two days each minute),
+  Its threads capture local ccusage (a full report hourly, today and the two days before each minute),
   pull Genius's snapshot every minute and record quota readings; failures go to
   `~/.config/cliproxyapi/dashboard.log` by error class only.
 - Collector: LaunchAgent `com.aleks.cliproxyapi-usage` runs `collect-usage.py` from the same
@@ -32,6 +35,7 @@ cd dashboard
 python3 -m unittest test_ccusage_data
 node check-ui.cjs
 node quota-ui-check.cjs index.html
+python3 collect-usage.py --self-test
 ```
 
 ## Deploy a reviewed commit
