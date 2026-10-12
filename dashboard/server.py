@@ -138,17 +138,20 @@ def readable(texts):
     return pairs, len(texts) - len(pairs)
 
 
-def choices(db, field, empty):
-    """Every stored account or model name with at least one readable record, across all history."""
-    names = set()
-    for (name,) in db.execute(f"SELECT DISTINCT json_extract({RECORD}, '$.{field}') FROM requests WHERE json_type({RECORD}) = 'object' "
-                              f"AND coalesce(json_type({RECORD}, '$.{field}'), 'null') IN ('text', 'null')").fetchall():
-        records = db.execute(f"SELECT record FROM requests WHERE json_type({RECORD}) = 'object' "
-                             f"AND json_extract({RECORD}, '$.{field}') IS ?", (name,))
-        # Stops at the first readable record, which for a real name is usually its first.
-        if any(readable([text])[0] for text in records):
-            names.add(name or empty)
-    return sorted(names)
+def choices(db, seen):
+    """Account and model names with at least one readable record across all history.
+
+    One scan of names; a record is parsed only while one of its names is unconfirmed, so a name found only on
+    unreadable records never becomes a filter choice."""
+    sources, models = {record.get('source') for record in seen}, {record.get('model') for record in seen}
+    for source, model, rowid in db.execute(
+            f"SELECT json_extract({RECORD}, '$.source'), json_extract({RECORD}, '$.model'), id FROM requests").fetchall():
+        if source not in sources or model not in models:
+            if readable(db.execute('SELECT record FROM requests WHERE id = ?', (rowid,)).fetchall())[0]:
+                sources.add(source)
+                models.add(model)
+    return dict(accounts=sorted({name or 'Unknown account' for name in sources}),
+                models=sorted({name or 'Unknown model' for name in models}))
 
 
 def cpa_from_genius():
@@ -188,7 +191,7 @@ def load(query):
             f"SELECT record FROM (SELECT record, json_extract({RECORD}, '$.timestamp') AS at FROM requests) "
             "WHERE NOT coalesce(at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*', 0) OR substr(at, 1, 10) >= ?",
             (margin,)).fetchall())
-        options = dict(accounts=choices(db, 'source', 'Unknown account'), models=choices(db, 'model', 'Unknown model'))
+        options = choices(db, [record for record, _ in rows])
         stamps = []
         for (at,) in db.execute(f"SELECT json_extract({RECORD}, '$.timestamp') FROM requests"):
             try:
