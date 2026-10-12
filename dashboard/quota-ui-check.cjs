@@ -1,4 +1,4 @@
-const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const fs = require('fs'), vm = require('vm');
 // User request: expected ten-minute readings stay valid; errors/resets remain visible; forecasts are labelled estimates.
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const script = html.split('<script>')[1].split('</script>')[0];
@@ -6,7 +6,7 @@ new vm.Script(script);
 const nodes = new Map();
 const document = {getElementById(id) { if(!nodes.has(id)) nodes.set(id, {classList: {toggle() {}}, textContent:'', innerHTML:'', addEventListener(){}}); return nodes.get(id)}};
 const context = vm.createContext({document, Intl, Date, console});
-vm.runInContext(script.split('const tick=')[0], context);
+vm.runInContext(script.split('const tick')[0], context);
 vm.runInContext(`
 const testNow=Date.now(), testAccount={observed_at:new Date(testNow-620000).toISOString()}, testWindow={utilization:.3,resets_at:new Date(testNow+1000000).toISOString(),status:'allowed'};
 if(windowState(testAccount,testWindow,testNow).kind!=='live') throw Error('Expected reading became stale before eleven minutes');
@@ -23,10 +23,10 @@ if($('poolWeek').textContent!=='0.70') throw Error('Recovered reading excluded')
 if($('outlookLeft').textContent!=='70%'||!$('outlookRate').textContent.endsWith('estimate')||!$('outlookNext').textContent.endsWith('estimate')||!$('outlookNote').textContent.includes('lasts until its reset')) throw Error('Outlook does not separate measured remaining from estimated pace');
 quotaError='Network unavailable';renderQuota();
 if(!$('quotaProblem').textContent.includes('Network unavailable')) throw Error('Network error hidden');
-if($('outlookLeft').textContent!=='70%'||$('outlookRate').textContent||$('outlookNext').textContent||$('outlookChart').innerHTML.includes('Projected')||!$('outlookChart').innerHTML.includes('Forecast paused')) throw Error('Failed refresh must keep the measured share and drop every estimate');
+if($('outlookLeft').textContent!=='70%'||$('outlookRate').textContent||$('outlookNext').textContent||$('outlookChart').innerHTML.includes('stroke-dasharray="7 6"')||!$('outlookChart').innerHTML.includes('Forecast paused')) throw Error('Failed refresh must keep the measured share and drop every estimate');
 quotaError='';quota.error='Collector failed';renderQuota();
 if($('outlookRate').textContent||!$('outlookChart').innerHTML.includes('Forecast paused')) throw Error('Backend quota error still forecasts');
 delete quota.error;renderQuota();
-if(!$('outlookRate').textContent.endsWith('estimate')||!$('outlookChart').innerHTML.includes('Projected')) throw Error('Forecast not restored after a successful refresh');
+if(!$('outlookRate').textContent.endsWith('estimate')||!$('outlookChart').innerHTML.includes('stroke-dasharray="7 6"')) throw Error('Forecast not restored after a successful refresh');
 `,context);
 console.log('PASS: UI syntax, scheduling grace, stale timeout, reset, provider failure, weekly exclusion/recovery, outlook measured vs estimate, network error, forecast paused on failed refresh and restored on recovery');
