@@ -49,7 +49,12 @@ def upstream_status():
 
 
 def number(value):
-    return max(0, value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return 0
+    # No real count gets near this; larger stored values would overflow float math downstream.
+    if value >= 2 ** 53:
+        raise ValueError('Stored number out of range')
+    return max(0, value)
 
 
 def normalize(record):
@@ -128,9 +133,22 @@ def readable(texts):
             # A NaN or infinite value anywhere would make the whole JSON response fail.
             json.dumps(record, allow_nan=False)
             pairs.append((record, row))
-        except (*ccusage_data.MALFORMED, RecursionError):
+        except (*ccusage_data.MALFORMED, RecursionError, OverflowError):
             pass
     return pairs, len(texts) - len(pairs)
+
+
+def choices(db, field, empty):
+    """Every stored account or model name with at least one readable record, across all history."""
+    names = set()
+    for (name,) in db.execute(f"SELECT DISTINCT json_extract({RECORD}, '$.{field}') FROM requests WHERE json_type({RECORD}) = 'object' "
+                              f"AND coalesce(json_type({RECORD}, '$.{field}'), 'null') IN ('text', 'null')").fetchall():
+        records = db.execute(f"SELECT record FROM requests WHERE json_type({RECORD}) = 'object' "
+                             f"AND json_extract({RECORD}, '$.{field}') IS ?", (name,))
+        # Stops at the first readable record, which for a real name is usually its first.
+        if any(readable([text])[0] for text in records):
+            names.add(name or empty)
+    return sorted(names)
 
 
 def cpa_from_genius():
@@ -170,17 +188,12 @@ def load(query):
             f"SELECT record FROM (SELECT record, json_extract({RECORD}, '$.timestamp') AS at FROM requests) "
             "WHERE NOT coalesce(at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*', 0) OR substr(at, 1, 10) >= ?",
             (margin,)).fetchall())
-        options = {key: [name for (name,) in db.execute(
-            f"SELECT DISTINCT coalesce(nullif(json_extract(record, '$.{field}'), ''), ?) FROM requests "
-            f"WHERE json_type({RECORD}) = 'object' AND coalesce(json_type({RECORD}, '$.{field}'), 'null') IN ('text', 'null') "
-            "ORDER BY 1",
-            (empty,))]
-            for key, field, empty in (('accounts', 'source', 'Unknown account'), ('models', 'model', 'Unknown model'))}
+        options = dict(accounts=choices(db, 'source', 'Unknown account'), models=choices(db, 'model', 'Unknown model'))
         stamps = []
         for (at,) in db.execute(f"SELECT json_extract({RECORD}, '$.timestamp') FROM requests"):
             try:
-                stamps.append(ccusage_data.stamp(at))
-            except ccusage_data.MALFORMED:
+                stamps.append(ccusage_data.stamp(at).astimezone(ZONE))
+            except (*ccusage_data.MALFORMED, OverflowError):
                 pass
     rows = [r for _, r in rows if start <= datetime.fromisoformat(r['timestamp']) <= now]
     for field in ('account', 'model'):
@@ -204,7 +217,7 @@ def load(query):
     data = dict(summary=summarize(rows), account_activity=account_activity(rows), groups=groups, daily=daily, hours=hours, options=options,
                 recent=sorted(rows, key=lambda r: r['timestamp'], reverse=True)[:100],
                 generated=now.isoformat(), collector_age=age, skipped=skipped,
-                history_start=min(stamps).astimezone(ZONE).isoformat() if stamps else None)
+                history_start=min(stamps).isoformat() if stamps else None)
     return data, rows
 
 
