@@ -39,7 +39,8 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        with sqlite3.connect(ROOT / 'usage.sqlite3') as db:
+        # Records are already off CPA's queue, so wait out the dashboard's read locks rather than drop them.
+        with sqlite3.connect(ROOT / 'usage.sqlite3', timeout=60) as db:
             db.execute('CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY, record TEXT NOT NULL)')
             keys = json.loads((ROOT / 'connection-keys.json').read_text())
             total = 0

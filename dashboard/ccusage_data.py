@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import re
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -150,6 +149,9 @@ def save(snapshot, since=None):
             # Days before a partial report's range were not asked for, so they keep the last full report's verdict.
             incoming[key] = row if since and row['date'] < since else dict(row, reportedInLatest=False)
     snapshot['rows'] = sorted(incoming.values(), key=lambda r: (r['date'], r['app'], r['model'] or ''))
+    if snapshot['quota'] is None and previous:
+        # A dropped or malformed quota block keeps the last real reading, which the page ages out at its reset.
+        snapshot['quota'] = previous['quota']
     write_json(STORE / (snapshot['machine']['id'] + '.json'), snapshot)
     return snapshot
 
@@ -204,7 +206,8 @@ def capture():
         if full:
             last_full_capture = time.monotonic()
         return snapshot
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+        print(f'capture failed: {type(error).__name__}', file=sys.stderr, flush=True)
         # save() carries the previous rows forward, marked as no longer reported.
         source = previous['source'] if previous else dict(tool='ccusage', version='unknown', offline=True,
                                                           costsIncluded=False)
@@ -220,7 +223,10 @@ class NoRedirect(HTTPRedirectHandler):
 def pull_genius():
     attempted = utcnow()
     health_file = STORE / 'genius-pull.json'
-    previous = json.loads(health_file.read_text()) if health_file.exists() else {}
+    try:
+        previous = json.loads(health_file.read_text())
+    except (OSError, ValueError):
+        previous = {}
     health = dict(attemptedAt=attempted, lastSuccessAt=previous.get('lastSuccessAt'),
                   successfulPulls=previous.get('successfulPulls', 0), status='error')
     try:
@@ -238,7 +244,8 @@ def pull_genius():
         snapshot = save(data)
         health.update(status='ok', lastSuccessAt=utcnow(), successfulPulls=health['successfulPulls'] + 1,
                       snapshotGeneratedAt=snapshot['generatedAt'], httpStatus=200)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        print(f'pull_genius failed: {type(error).__name__}', file=sys.stderr, flush=True)
         health['error'] = 'snapshot_pull_failed'
     write_json(health_file, health)
     return health
@@ -249,7 +256,8 @@ def collect(action=capture):
         start = time.monotonic()
         try:
             action()
-        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+        except Exception as error:
+            # Threads are never restarted, so every failure is logged and retried next minute.
             # Class name only: messages can carry snapshot or network details.
             print(f'{action.__name__} failed: {type(error).__name__}', file=sys.stderr, flush=True)
         time.sleep(max(1, 60 - (time.monotonic() - start)))
@@ -271,14 +279,15 @@ def dashboard():
     states, rows = [], []
     now = datetime.now(timezone.utc)
     for machine in MACHINES:
-        transport, pulls = {}, STORE / (machine + '-pull.json')
         try:
             snapshot = read(machine)
-            if pulls.exists():
-                transport = json.loads(pulls.read_text())
         except (OSError, ValueError, KeyError, TypeError):
             states.append(dict(machineId=machine, state='error', dataUpdatedAt=None))
             continue
+        try:
+            transport = json.loads((STORE / (machine + '-pull.json')).read_text())
+        except (OSError, ValueError):
+            transport = {}
         if snapshot is None:
             states.append(dict(machineId=machine, state='error' if transport.get('status') == 'error' else 'pending',
                                dataUpdatedAt=None, transport=transport))
