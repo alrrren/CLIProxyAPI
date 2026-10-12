@@ -610,7 +610,7 @@ function pace(a, st, now) {
       basis: 'over the last ' + span(seen - first[0]),
     };
   let elapsed = now - (st.reset - WEEK);
-  return { rate: elapsed >= HOUR ? (1 - st.left) / elapsed : null, basis: 'since its window began' };
+  return { rate: elapsed >= HOUR ? (1 - st.left) / elapsed : null, basis: 'since ~7 days before its reset' };
 }
 let quotaProvider = '',
   quotaView = 'remaining',
@@ -677,7 +677,7 @@ function renderOutlook(on, now) {
     ' · estimate';
   $('outlookKey').textContent =
     (quotaView === 'drain'
-      ? 'Pace = share of the week used ÷ time · '
+      ? 'Pace = estimated drain rate · '
       : "Solid = stored readings · dashed = estimate at each account's pace · ") +
     live.map(x => label(x.a.name) + ' pace ' + x.basis).join(' · ');
   if (quotaView === 'drain') {
@@ -701,7 +701,7 @@ function renderOutlook(on, now) {
           Math.round(used * 100) +
           '% in ' +
           span(now - start) +
-          ' since ' +
+          ' since ~' +
           escape(clock(start)) +
           ' · ' +
           (x.rate == null
@@ -895,13 +895,13 @@ function renderOutlook(on, now) {
               .join(', ') +
             ')'
           : '') +
-        (old ? ' · stored' : Math.abs(t - now) < 60000 ? ' · measured' : ' · estimate');
+        (old ? ' · stored' : ' · estimate');
       guide.classList.remove('hide');
     };
   }
   const paceLabel = x => {
     let gap = (1 - x.st.left) * 100 - Math.min(1, Math.max(0, (now - (x.st.reset - WEEK)) / WEEK)) * 100;
-    return gap > 5 ? 'ahead of pace' : gap < -5 ? 'under pace' : 'on pace';
+    return gap > 5 ? 'ahead of an even weekly spread' : gap < -5 ? 'under an even weekly spread' : 'on an even weekly spread';
   };
   $('outlookNote').textContent =
     live
@@ -982,7 +982,7 @@ function renderQuota() {
           fresh +
           '/' +
           on.length +
-          ' enabled accounts fresh. Quota checks run every ten minutes. Readings expire after eleven minutes, after a failed check, or at reset.';
+          ' enabled accounts fresh. Quota checks run every ten minutes. Readings expire after eleven minutes (Genius readings hold until reset), after a failed check, or at reset.';
   $('poolCount').textContent =
     list.length + ' account' + (list.length === 1 ? '' : 's') + ' · ' + on.length + ' enabled';
   $('poolCountSub').textContent = '· ' + fresh + ' fresh';
@@ -1102,11 +1102,12 @@ async function loadUpstream() {
       '</div>' +
       (detail ? '<div class="update-detail">' + detail + '</div>' : '') +
       '<div class="update-meta">' +
-      escape(u.version) +
-      ' · Checked ' +
+      (u.version ? escape(u.version) + ' · ' : '') +
+      'Checked ' +
       escape(new Date(u.checked_at).toLocaleTimeString('en', { timeZone: TZ })) +
       ' · Checks every five minutes with live refresh</div>';
   } catch (e) {
+    $('upstream').className = 'notice section';
     $('upstream').textContent = 'Unable to check CPA upstream. Try Refresh.';
   } finally {
     upstreamPending = false;
@@ -1321,7 +1322,9 @@ function renderCc() {
 }
 function renderSplit() {
   const cpa = ccData.cpaFromGenius,
-    ready = ['aleks-mbp', 'genius'].every(id => ccData.machines.find(m => m.machineId === id)?.dataUpdatedAt);
+    machines = ['aleks-mbp', 'genius'].map(id => ccData.machines.find(m => m.machineId === id)),
+    ready = machines.every(m => m?.dataUpdatedAt),
+    lagging = machines.filter(m => m && m.state !== 'fresh').map(m => ccName(m.machineId) + ' ' + m.state);
   if (!cpa?.since || !ready) {
     for (const id of ['splitPersonal', 'splitWork', 'splitShare', 'splitSince']) $(id).textContent = '—';
     $('splitPersonalDetail').textContent =
@@ -1335,14 +1338,17 @@ function renderSplit() {
         ? "Genius's tailnet address could not be resolved, so CPA traffic cannot be attributed."
         : !cpa.since
           ? 'Waiting for the first CPA request recorded with its source.'
-          : 'Waiting for snapshots from both machines.') +
+          : lagging.length
+            ? 'Waiting for snapshots: ' + lagging.join(', ') + '.'
+            : 'Waiting for snapshots from both machines.') +
       '</div>';
     return;
   }
   const today = localDay(new Date()),
     start = new Date(today + 'T00:00:00Z');
   start.setUTCDate(start.getUTCDate() - 29);
-  const first = [localDay(new Date(cpa.since)), start.toISOString().slice(0, 10)].sort()[1],
+  const sinceDay = localDay(new Date(cpa.since)),
+    first = [sinceDay, start.toISOString().slice(0, 10)].sort()[1],
     rows = [],
     claude = (id, date) =>
       ccData.rows
@@ -1412,7 +1418,9 @@ function renderSplit() {
     rows.length +
     ' day' +
     (rows.length === 1 ? '' : 's') +
-    ' with a source-tracked split · first day partial' +
+    ' with a source-tracked split' +
+    (first === sinceDay ? ' · first day partial' : '') +
+    (lagging.length ? ' · ' + lagging.join(', ') + ', so recent days may be off' : '') +
     (over
       ? ' · ' +
         over +
@@ -1429,15 +1437,17 @@ async function loadCc() {
     const res = await fetch('/api/ccusage', { cache: 'no-store' });
     if (!res.ok) throw Error('ccusage snapshots unavailable (' + res.status + ').');
     ccData = await res.json();
-    renderCc();
-    renderSplit();
     $('ccProblem').classList.add('hide');
-  } catch (e) {
+  } catch {
     $('ccProblem').textContent = 'Snapshot refresh failed · showing last loaded data.';
     $('ccProblem').classList.remove('hide');
+    return;
   } finally {
     ccPending = false;
   }
+  // Outside the try, so a rendering bug surfaces in the console instead of posing as a failed refresh.
+  renderCc();
+  renderSplit();
 }
 ['ccDays', 'ccMachine', 'ccApp', 'ccModel'].forEach(id =>
   $(id).addEventListener('change', () => {

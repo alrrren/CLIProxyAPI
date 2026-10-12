@@ -1,5 +1,5 @@
 const fs=require('fs'),vm=require('vm');
-// User contract: consumption uses real snapshots, missing Genius remains pending, filters do not sum CPA.
+// User contract: consumption uses real snapshots, missing Genius remains pending.
 const script=fs.readFileSync('index.html','utf8').split('<script>')[1].split('</script>')[0];
 new vm.Script(script);
 const nodes=new Map(),document={getElementById(id){if(!nodes.has(id))nodes.set(id,{value:'',classList:{toggle(){},add(){},remove(){}},addEventListener(){},textContent:'',innerHTML:''});return nodes.get(id)}};
