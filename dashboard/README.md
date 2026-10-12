@@ -4,6 +4,8 @@ Local quota and usage dashboard for this machine's CLIProxyAPI. It is not part o
 CPA Go server; the dashboard reads CPA's runtime files read-only and serves `127.0.0.1:8320`;
 the collector drains CPA's usage queue.
 Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net:8321`.
+The server answers 403 to any other Host, so renaming or re-porting that Serve URL also needs
+`HOSTS` in `server.py` updated.
 
 ## Layout
 

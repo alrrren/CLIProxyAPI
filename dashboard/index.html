@@ -488,7 +488,13 @@ function render(d) {
       ? new Date(d.history_start).toLocaleString('en', { timeZone: TZ })
       : 'when the first request is saved') +
     '. Refreshes every 20 seconds. Times shown in Mexico City.' +
-    (d.skipped ? ' ' + d.skipped + ' stored requests could not be read and are left out here and in the CSV.' : '');
+    (d.skipped
+      ? ' ' +
+        d.skipped +
+        ' stored request' +
+        (d.skipped === 1 ? '' : 's') +
+        ' near this period could not be read; any that match these filters are left out here and in the CSV.'
+      : '');
 }
 async function refresh() {
   if (pending) return;
@@ -1431,7 +1437,13 @@ function renderSplit() {
         (over === 1 ? '' : 's') +
         " where CPA counted more than Genius's ccusage, Work shown as zero"
       : '') +
-    (cpa.skipped ? ' · ' + cpa.skipped + ' stored CPA requests could not be read, so Personal may be low' : '') +
+    (cpa.skipped
+      ? ' · ' +
+        cpa.skipped +
+        ' stored CPA request' +
+        (cpa.skipped === 1 ? '' : 's') +
+        ' could not be read, so Personal may be low'
+      : '') +
     '.';
 }
 async function loadCc() {

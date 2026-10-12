@@ -187,11 +187,11 @@ def capture():
                                  *(['--since', since.strftime('%Y%m%d')] if since else [])],
                                 capture_output=True, text=True, timeout=55, check=True)
         report = json.loads(result.stdout)
-        version = subprocess.run(['/opt/homebrew/bin/ccusage', '--version'], capture_output=True,
-                                 text=True, timeout=5, check=True).stdout.split()
-        if not version:
+        words = subprocess.run(['/opt/homebrew/bin/ccusage', '--version'], capture_output=True,
+                               text=True, timeout=5, check=True).stdout.split()
+        if not words:
             raise ValueError('ccusage printed no version')
-        version = version[-1]
+        version = words[-1]
         rows = []
         for day in report['daily']:
             for app in day['agents']:
