@@ -489,16 +489,20 @@ function render(d) {
       : 'when the first request is saved') +
     '. Refreshes every 20 seconds. Times shown in Mexico City.' +
     (d.skipped ? ' ' + d.skipped + ' stored requests could not be read and are left out here and in the CSV.' : '');
-  $('export').href = '/api/export.csv?' + params();
 }
 async function refresh() {
   if (pending) return;
   pending = true;
   $('refresh').disabled = true;
+  const query = params().toString();
   try {
-    let res = await fetch('/api/data?' + params());
+    let res = await fetch('/api/data?' + query);
     if (!res.ok) throw Error('Dashboard data is temporarily unavailable (' + res.status + ').');
-    render(await res.json());
+    const d = await res.json();
+    // Filters changed while this was loading; the follow-up below fetches what is selected now.
+    if (query !== params().toString()) return;
+    render(d);
+    $('export').href = '/api/export.csv?' + query;
     $('problem').classList.add('hide');
   } catch (e) {
     $('problem').textContent = e.message;
@@ -507,6 +511,7 @@ async function refresh() {
   } finally {
     pending = false;
     $('refresh').disabled = false;
+    if (query !== params().toString()) refresh();
   }
 }
 
