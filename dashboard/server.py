@@ -123,10 +123,15 @@ def cpa_from_genius():
     return dict(since=min((row['timestamp'] for _, row in rows), default=None), days=days)
 
 
+class InvalidFilter(Exception):
+    pass
+
+
 def load(query):
-    days = int(query.get('days', ['7'])[0])
-    if days not in (1, 7, 30, 90):
-        raise ValueError('Unsupported date range')
+    days = query.get('days', ['7'])[0]
+    if days not in ('1', '7', '30', '90'):
+        raise InvalidFilter
+    days = int(days)
     now = datetime.now(ZONE)
     start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
     # Only records near the period are parsed; the one-day margin covers records written in another UTC offset,
@@ -255,10 +260,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(content)))
             self.end_headers()
             self.wfile.write(content)
-        except ValueError:
+        except InvalidFilter:
             self.send_error(400, 'Invalid filters')
         except (sqlite3.Error, OSError):
             self.send_error(503, 'Usage storage unavailable')
+        except (ValueError, KeyError, TypeError):
+            self.send_error(500, 'Dashboard data unreadable')
 
     # Request lines would carry filter query strings into the log.
     def log_message(self, *_):
