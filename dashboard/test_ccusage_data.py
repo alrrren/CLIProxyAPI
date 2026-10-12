@@ -25,6 +25,8 @@ class Tests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.patch=patch.object(c,'STORE',Path(self.temp.name)/'snapshots');self.patch.start();self.addCleanup(self.patch.stop)
+        # Each test starts as if no full report has run, whatever ran before it.
+        full=patch.object(c,'last_full_capture',0.0);full.start();self.addCleanup(full.stop)
 
     def test_repeated_replacement_models_and_history(self):
         initial=fixture();old=copy.deepcopy(initial['rows'][0]);old['date']='2026-10-10';initial['rows'].append(old)

@@ -19,6 +19,8 @@ COMMAND = ['daily', '--json', '--by-agent', '--offline', '--no-cost', '--timezon
 COUNTERS = ('inputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'outputTokens', 'totalTokens')
 SEMANTICS = 'input_excludes_cache; total=input+cacheCreation+cacheRead+output'
 last_full_capture = 0.0
+# What malformed stored or pulled JSON raises once parsed.
+MALFORMED = (ValueError, KeyError, TypeError, AttributeError)
 GENIUS_URL = 'https://genius.tail035f92.ts.net:8444/snapshot.json'
 MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 LIMITATIONS = [
@@ -109,7 +111,7 @@ def validate(snapshot):
         # A malformed quota reading must not discard the usage rows that arrived with it.
         try:
             quota = quota_block(snapshot['quota'])
-        except (ValueError, KeyError, TypeError, AttributeError):
+        except MALFORMED:
             pass
     return dict(schemaVersion=1, machine={'id': machine}, timezone=ZONE,
                 generatedAt=snapshot['generatedAt'], dataUpdatedAt=updated, status=snapshot['status'],
@@ -132,7 +134,7 @@ def read_or_none(machine):
     """A stored file that no longer validates gives way to the next good snapshot instead of blocking it."""
     try:
         return read(machine)
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except MALFORMED:
         return None
 
 
@@ -206,7 +208,7 @@ def capture():
         if full:
             last_full_capture = time.monotonic()
         return snapshot
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+    except (OSError, subprocess.SubprocessError, *MALFORMED) as error:
         print(f'capture failed: {type(error).__name__}', file=sys.stderr, flush=True)
         # save() carries the previous rows forward, marked as no longer reported.
         source = previous['source'] if previous else dict(tool='ccusage', version='unknown', offline=True,
@@ -224,8 +226,8 @@ def pull_genius():
     attempted = utcnow()
     health_file = STORE / 'genius-pull.json'
     try:
-        previous = json.loads(health_file.read_text())
-    except (OSError, ValueError):
+        previous = dict(json.loads(health_file.read_text()))
+    except (OSError, *MALFORMED):
         previous = {}
     health = dict(attemptedAt=attempted, lastSuccessAt=previous.get('lastSuccessAt'),
                   successfulPulls=previous.get('successfulPulls', 0), status='error')
@@ -244,7 +246,7 @@ def pull_genius():
         snapshot = save(data)
         health.update(status='ok', lastSuccessAt=utcnow(), successfulPulls=health['successfulPulls'] + 1,
                       snapshotGeneratedAt=snapshot['generatedAt'], httpStatus=200)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+    except (OSError, *MALFORMED) as error:
         print(f'pull_genius failed: {type(error).__name__}', file=sys.stderr, flush=True)
         health['error'] = 'snapshot_pull_failed'
     write_json(health_file, health)
@@ -281,12 +283,12 @@ def dashboard():
     for machine in MACHINES:
         try:
             snapshot = read(machine)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, *MALFORMED):
             states.append(dict(machineId=machine, state='error', dataUpdatedAt=None))
             continue
         try:
-            transport = json.loads((STORE / (machine + '-pull.json')).read_text())
-        except (OSError, ValueError):
+            transport = dict(json.loads((STORE / (machine + '-pull.json')).read_text()))
+        except (OSError, *MALFORMED):
             transport = {}
         if snapshot is None:
             states.append(dict(machineId=machine, state='error' if transport.get('status') == 'error' else 'pending',

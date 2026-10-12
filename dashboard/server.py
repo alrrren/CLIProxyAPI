@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from urllib.request import Request, urlopen
@@ -263,9 +264,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(content)
         except InvalidFilter:
             self.send_error(400, 'Invalid filters')
-        except (sqlite3.Error, OSError):
+        except (sqlite3.Error, OSError) as error:
+            # Path only: the query string carries filter values.
+            print(f'{parsed.path} failed: {type(error).__name__}', file=sys.stderr, flush=True)
             self.send_error(503, 'Usage storage unavailable')
-        except (ValueError, KeyError, TypeError):
+        except ccusage_data.MALFORMED as error:
+            print(f'{parsed.path} failed: {type(error).__name__}', file=sys.stderr, flush=True)
             self.send_error(500, 'Dashboard data unreadable')
 
     # Request lines would carry filter query strings into the log.
