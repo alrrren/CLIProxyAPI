@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
-import math
 from pathlib import Path
 import socket
 import sqlite3
@@ -50,7 +49,7 @@ def upstream_status():
 
 
 def number(value):
-    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < math.inf else 0
+    return max(0, value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
 def normalize(record):
@@ -65,9 +64,10 @@ def normalize(record):
     read = number(inp.get('cache_read_tokens')) if accurate else number(tokens.get('cache_read_tokens')) if explicit else None
     write = number(inp.get('cache_write_tokens')) if accurate else number(tokens.get('cache_creation_tokens')) if explicit else None
     timestamp = ccusage_data.stamp(record['timestamp']).astimezone(ZONE)
-    account, model = record.get('source') or 'Unknown account', record.get('model') or 'Unknown model'
-    if not (isinstance(account, str) and isinstance(model, str)):
+    account, model = record.get('source'), record.get('model')
+    if not all(isinstance(value, (str, type(None))) for value in (account, model)):
         raise TypeError('Stored account and model must be text')
+    account, model = account or 'Unknown account', model or 'Unknown model'
     return dict(timestamp=timestamp.isoformat(), date=timestamp.date().isoformat(), hour=timestamp.hour,
                 account=account, model=model,
                 input=input_total, output=output, total=total, read=read, write=write,
@@ -123,10 +123,12 @@ def readable(texts):
     pairs = []
     for (text,) in texts:
         try:
-            # int() raises on NaN and Infinity, so Python refuses the same records SQLite's json_valid does.
-            record = json.loads(text, parse_constant=int)
-            pairs.append((record, normalize(record)))
-        except ccusage_data.MALFORMED:
+            record = json.loads(text)
+            row = normalize(record)
+            # A NaN or infinite value anywhere would make the whole JSON response fail.
+            json.dumps(record, allow_nan=False)
+            pairs.append((record, row))
+        except (*ccusage_data.MALFORMED, RecursionError):
             pass
     return pairs, len(texts) - len(pairs)
 
@@ -159,18 +161,19 @@ def load(query):
     days = int(days)
     now = datetime.now(ZONE)
     start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    # Only records near the period are parsed; the one-day margin covers records written in another UTC offset,
-    # and the exact range check below still applies.
+    # Only records near the period, or without a date SQL can read, are parsed; the one-day margin covers records
+    # written in another UTC offset, and the exact range check below still applies.
     margin = (start - timedelta(days=1)).date().isoformat()
     with readonly(ROOT / 'usage.sqlite3') as db:
-        # Records without a readable date are read too, so they are counted as unreadable rather than silently dropped.
+        # Undated records are read too, so they are counted as unreadable rather than silently dropped.
         rows, skipped = readable(db.execute(
             f"SELECT record FROM (SELECT record, json_extract({RECORD}, '$.timestamp') AS at FROM requests) "
             "WHERE NOT coalesce(at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*', 0) OR substr(at, 1, 10) >= ?",
             (margin,)).fetchall())
         options = {key: [name for (name,) in db.execute(
-            f"SELECT DISTINCT coalesce(nullif(json_extract({RECORD}, '$.{field}'), ''), ?) FROM requests "
-            f"WHERE json_valid(record) AND coalesce(json_type({RECORD}, '$.{field}'), 'null') IN ('text', 'null') ORDER BY 1",
+            f"SELECT DISTINCT coalesce(nullif(json_extract(record, '$.{field}'), ''), ?) FROM requests "
+            f"WHERE json_type({RECORD}) = 'object' AND coalesce(json_type({RECORD}, '$.{field}'), 'null') IN ('text', 'null') "
+            "ORDER BY 1",
             (empty,))]
             for key, field, empty in (('accounts', 'source', 'Unknown account'), ('models', 'model', 'Unknown model'))}
         stamps = []
