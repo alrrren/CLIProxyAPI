@@ -145,9 +145,9 @@ def choices(db, seen):
     unreadable records never becomes a filter choice."""
     sources, models = {record.get('source') for record in seen}, {record.get('model') for record in seen}
     for source, model, rowid in db.execute(
-            f"SELECT json_extract({RECORD}, '$.source'), json_extract({RECORD}, '$.model'), id FROM requests").fetchall():
+            f"SELECT json_extract({RECORD}, '$.source'), json_extract({RECORD}, '$.model'), rowid FROM requests").fetchall():
         if source not in sources or model not in models:
-            if readable(db.execute('SELECT record FROM requests WHERE id = ?', (rowid,)).fetchall())[0]:
+            if readable(db.execute('SELECT record FROM requests WHERE rowid = ?', (rowid,)).fetchall())[0]:
                 sources.add(source)
                 models.add(model)
     return dict(accounts=sorted({name or 'Unknown account' for name in sources}),
