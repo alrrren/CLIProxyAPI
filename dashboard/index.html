@@ -1322,9 +1322,8 @@ function renderCc() {
 }
 function renderSplit() {
   const cpa = ccData.cpaFromGenius,
-    machines = ['aleks-mbp', 'genius'].map(id => ccData.machines.find(m => m.machineId === id)),
-    ready = machines.every(m => m?.dataUpdatedAt),
-    lagging = machines.filter(m => m && m.state !== 'fresh').map(m => ccName(m.machineId) + ' ' + m.state);
+    ready = ccData.machines.every(m => m.dataUpdatedAt),
+    lagging = ccData.machines.filter(m => m.state !== 'fresh').map(m => ccName(m.machineId) + ' ' + m.state);
   if (!cpa?.since || !ready) {
     for (const id of ['splitPersonal', 'splitWork', 'splitShare', 'splitSince']) $(id).textContent = '—';
     $('splitPersonalDetail').textContent =
@@ -1338,9 +1337,7 @@ function renderSplit() {
         ? "Genius's tailnet address could not be resolved, so CPA traffic cannot be attributed."
         : !cpa.since
           ? 'Waiting for the first CPA request recorded with its source.'
-          : lagging.length
-            ? 'Waiting for snapshots: ' + lagging.join(', ') + '.'
-            : 'Waiting for snapshots from both machines.') +
+          : 'Waiting for snapshots: ' + lagging.join(', ') + '.') +
       '</div>';
     return;
   }
