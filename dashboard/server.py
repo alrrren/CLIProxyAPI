@@ -111,13 +111,11 @@ def cpa_from_genius():
     with sqlite3.connect(f'file:{ROOT / "usage.sqlite3"}?mode=ro', uri=True) as db:
         records = [json.loads(row[0]) for row in
                    db.execute("SELECT record FROM requests WHERE json_extract(record, '$.client') IS NOT NULL")]
-    days = {}
-    for record in records:
-        row = normalize(record)
-        if record['client'] in genius and not row['failed']:
+    days, rows = {}, [(record['client'], normalize(record)) for record in records]
+    for client, row in rows:
+        if client in genius and not row['failed']:
             days[row['date']] = days.get(row['date'], 0) + row['total']
-    since = min((normalize(r)['timestamp'] for r in records), default=None)
-    return dict(since=since, days=days)
+    return dict(since=min((row['timestamp'] for _, row in rows), default=None), days=days)
 
 
 def load(query):
@@ -126,10 +124,17 @@ def load(query):
         raise ValueError('Unsupported date range')
     now = datetime.now(ZONE)
     start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Only records near the period are parsed; the one-day margin covers records written in another UTC offset,
+    # and the exact range check below still applies.
+    margin = (start - timedelta(days=1)).date().isoformat()
     with sqlite3.connect(f'file:{ROOT / "usage.sqlite3"}?mode=ro', uri=True) as db:
-        all_rows = [normalize(json.loads(row[0])) for row in db.execute('SELECT record FROM requests')]
-    options = dict(accounts=sorted({r['account'] for r in all_rows}), models=sorted({r['model'] for r in all_rows}))
-    rows = [r for r in all_rows if start <= datetime.fromisoformat(r['timestamp']) <= now]
+        rows = [normalize(json.loads(row[0])) for row in
+                db.execute("SELECT record FROM requests WHERE substr(json_extract(record, '$.timestamp'), 1, 10) >= ?", (margin,))]
+        options = {key: [name for (name,) in db.execute(
+            f"SELECT DISTINCT coalesce(nullif(json_extract(record, '$.{field}'), ''), ?) FROM requests ORDER BY 1", (empty,))]
+            for key, field, empty in (('accounts', 'source', 'Unknown account'), ('models', 'model', 'Unknown model'))}
+        first, last = db.execute("SELECT min(json_extract(record, '$.timestamp')), max(json_extract(record, '$.timestamp')) FROM requests").fetchone()
+    rows = [r for r in rows if start <= datetime.fromisoformat(r['timestamp']) <= now]
     for field in ('account', 'model'):
         selected = query.get(field, [''])[0]
         if selected:
@@ -150,8 +155,8 @@ def load(query):
     data = dict(summary=summarize(rows), account_activity=account_activity(rows), groups=groups, daily=daily, hours=hours, options=options,
                 recent=sorted(rows, key=lambda r: r['timestamp'], reverse=True)[:100],
                 generated=now.isoformat(), timezone=str(ZONE), collector_age=age,
-                history_start=min((r['timestamp'] for r in all_rows), default=None),
-                last_request=max((r['timestamp'] for r in all_rows), default=None))
+                history_start=first and normalize(dict(timestamp=first))['timestamp'],
+                last_request=last and normalize(dict(timestamp=last))['timestamp'])
     return data, rows
 
 
