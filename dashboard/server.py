@@ -4,6 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
+import socket
 import sqlite3
 import threading
 import time
@@ -100,6 +101,24 @@ def account_activity(rows):
                 last_change=changed[-1][1]['timestamp'] if changed else None)
 
 
+def cpa_from_genius():
+    """Daily tokens Genius sent through CPA, counted only since the collector began keeping each request's source."""
+    try:
+        genius = {info[4][0] for info in socket.getaddrinfo(urlparse(ccusage_data.GENIUS_URL).hostname, None)}
+    except OSError:
+        return None
+    with sqlite3.connect(f'file:{ROOT / "usage.sqlite3"}?mode=ro', uri=True) as db:
+        records = [json.loads(row[0]) for row in
+                   db.execute("SELECT record FROM requests WHERE json_extract(record, '$.client') IS NOT NULL")]
+    days = {}
+    for record in records:
+        row = normalize(record)
+        if record['client'] in genius and not row['failed']:
+            days[row['date']] = days.get(row['date'], 0) + row['total']
+    since = min((normalize(r)['timestamp'] for r in records), default=None)
+    return dict(since=since, days=days)
+
+
 def load(query):
     days = int(query.get('days', ['7'])[0])
     if days not in (1, 7, 30, 90):
@@ -152,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
                 content = json.dumps(pool, allow_nan=False).encode()
                 mime = 'application/json'
             elif parsed.path == '/api/ccusage':
-                content = json.dumps(ccusage_data.dashboard(), allow_nan=False).encode()
+                content = json.dumps(dict(ccusage_data.dashboard(), cpaFromGenius=cpa_from_genius()), allow_nan=False).encode()
                 mime = 'application/json'
             elif parsed.path == '/api/upstream':
                 content = json.dumps(upstream_status()).encode()
