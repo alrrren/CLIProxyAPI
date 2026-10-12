@@ -143,7 +143,11 @@ class Handler(BaseHTTPRequestHandler):
                 content = Path(__file__).with_name('index.html').read_bytes()
                 mime = 'text/html; charset=utf-8'
             elif parsed.path == '/api/accounts':
-                content = (ROOT / 'account-pool.json').read_bytes()
+                pool = json.loads((ROOT / 'account-pool.json').read_bytes())
+                work = ccusage_data.genius_account()
+                if work:
+                    pool['accounts'].append(work)
+                content = json.dumps(pool, allow_nan=False).encode()
                 mime = 'application/json'
             elif parsed.path == '/api/ccusage':
                 content = json.dumps(ccusage_data.dashboard(), allow_nan=False).encode()

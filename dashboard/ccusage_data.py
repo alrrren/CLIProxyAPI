@@ -36,6 +36,23 @@ def utcnow():
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
+def quota_window(window):
+    if window is None:
+        return None
+    used, resets = window['usedPercentage'], window['resetsAt']
+    if type(used) not in (int, float) or not 0 <= used <= 100 or type(resets) is not int or not 0 < resets < 2 ** 32:
+        raise ValueError('Invalid quota window')
+    return dict(usedPercentage=used, resetsAt=resets)
+
+
+def quota_block(quota):
+    if stamp(quota['observedAt']) > datetime.now(timezone.utc) + timedelta(minutes=5) or \
+            quota['source'] != 'claude-code-statusline':
+        raise ValueError('Invalid quota block')
+    return dict(source=quota['source'], observedAt=quota['observedAt'],
+                fiveHour=quota_window(quota['fiveHour']), sevenDay=quota_window(quota['sevenDay']))
+
+
 def validate(snapshot):
     machine = snapshot['machine']['id']
     if (type(snapshot['schemaVersion']) is not int or snapshot['schemaVersion'] != 1 or machine not in MACHINES or
@@ -85,6 +102,13 @@ def validate(snapshot):
         errors.append(dict(source='ccusage', code='capture_failed', at=error['at']))
     if snapshot['status'] == 'error' and not errors:
         errors.append(dict(source='ccusage', code='capture_failed', at=snapshot['generatedAt']))
+    quota = None
+    if machine == 'genius' and snapshot.get('quota') is not None:
+        # A malformed quota reading must not discard the usage rows that arrived with it.
+        try:
+            quota = quota_block(snapshot['quota'])
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
     return dict(schemaVersion=1, machine={'id': machine}, timezone=ZONE,
                 generatedAt=snapshot['generatedAt'], dataUpdatedAt=updated, status=snapshot['status'],
                 source=dict(tool='ccusage', version=version, offline=True, costsIncluded=False, command=COMMAND),
@@ -94,7 +118,7 @@ def validate(snapshot):
                               retainedHistoricalRows=sum(not r['reportedInLatest'] for r in rows),
                               limitations=LIMITATIONS + (['Genius ccusage 20.0.20 has known modern-event coverage gaps.']
                                                          if machine == 'genius' and version == '20.0.20' else [])),
-                rows=rows, errors=errors)
+                rows=rows, errors=errors, quota=quota)
 
 
 def read(machine):
@@ -216,6 +240,18 @@ def collect(action=capture):
         except (OSError, ValueError, KeyError, TypeError):
             pass
         time.sleep(max(1, 60 - (time.monotonic() - start)))
+
+
+def genius_account():
+    snapshot = read('genius')
+    quota = snapshot and snapshot.get('quota')
+    if not quota:
+        return None
+    window = lambda w: w and dict(utilization=w['usedPercentage'] / 100, status=None,
+                                  resets_at=datetime.fromtimestamp(w['resetsAt'], timezone.utc).isoformat())
+    return dict(name='Work · Genius', provider='claude', via='genius', disabled=False, status=None, priority=None,
+                observed_at=quota['observedAt'], quota_error=None,
+                five_hour=window(quota['fiveHour']), seven_day=window(quota['sevenDay']))
 
 
 def dashboard():
