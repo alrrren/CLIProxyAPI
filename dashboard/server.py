@@ -24,9 +24,10 @@ def upstream_status():
     with UPDATE_LOCK:
         if UPDATE_CACHE and time.monotonic() < UPDATE_CACHE['expires']:
             return UPDATE_CACHE['result']
-        build = json.loads((ROOT / 'dashboard/build.json').read_text())
-        result = dict(build, status='unknown', checked_at=datetime.now(ZONE).isoformat())
+        result = dict(status='unknown', checked_at=datetime.now(ZONE).isoformat())
         try:
+            build = json.loads((ROOT / 'dashboard/build.json').read_text())
+            result = dict(build, **result)
             def github(path):
                 request = Request('https://api.github.com/repos/router-for-me/CLIProxyAPI/' + path,
                                   headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'CPA-Pool-Dashboard'})
@@ -84,7 +85,7 @@ def summarize(rows):
     return dict(requests=len(rows), failures=sum(r['failed'] for r in rows),
                 total=sum(r['total'] for r in rows), input=sum(r['input'] for r in rows),
                 output=sum(r['output'] for r in rows), cached=sum(r['read'] for r in known),
-                cache_write=sum(r['write'] or 0 for r in known), cache_covered=len(known),
+                cache_write=sum(r['write'] for r in known), cache_covered=len(known),
                 cache_rate=sum(r['read'] for r in known) / input_known if input_known else None,
                 p50=percentile([r['duration'] for r in rows], .5),
                 p95=percentile([r['duration'] for r in rows], .95),
@@ -184,20 +185,21 @@ def record_quota():
             for a in accounts()['accounts']
             if not a.get('disabled') and not a.get('quota_error') and a.get('observed_at') and a.get('seven_day') and
             isinstance(a['seven_day'].get('utilization'), (int, float)) and a['seven_day'].get('resets_at')]
-    try:
-        with sqlite3.connect(HISTORY) as db:
-            db.execute('CREATE TABLE IF NOT EXISTS readings (account TEXT, at REAL, used REAL, reset REAL, PRIMARY KEY (account, at))')
-            db.executemany('INSERT OR IGNORE INTO readings VALUES (?, ?, ?, ?)', rows)
-            db.execute('DELETE FROM readings WHERE at < ?', (time.time() - 8 * 86400,))
-    except sqlite3.Error:
-        pass
+    with sqlite3.connect(HISTORY) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS readings (account TEXT, at REAL, used REAL, reset REAL, PRIMARY KEY (account, at))')
+        db.executemany('INSERT OR IGNORE INTO readings VALUES (?, ?, ?, ?)', rows)
+        db.execute('DELETE FROM readings WHERE at < ?', (time.time() - 8 * 86400,))
 
 
 def with_history(pool):
     if not HISTORY.exists():
         return pool
-    with readonly(HISTORY) as db:
-        readings = db.execute('SELECT account, at, used, reset FROM readings ORDER BY at').fetchall()
+    # History only refines pace, so an unreadable store must not hide the quota readings themselves.
+    try:
+        with readonly(HISTORY) as db:
+            readings = db.execute('SELECT account, at, used, reset FROM readings ORDER BY at').fetchall()
+    except sqlite3.Error:
+        return pool
     for account in pool['accounts']:
         week = account.get('seven_day') or {}
         reset = epoch(week['resets_at']) if week.get('resets_at') else None
@@ -258,6 +260,7 @@ class Handler(BaseHTTPRequestHandler):
         except (sqlite3.Error, OSError):
             self.send_error(503, 'Usage storage unavailable')
 
+    # Request lines would carry filter query strings into the log.
     def log_message(self, *_):
         pass
 

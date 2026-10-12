@@ -41,11 +41,6 @@ def main():
             return
         with sqlite3.connect(ROOT / 'usage.sqlite3') as db:
             db.execute('CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY, record TEXT NOT NULL)')
-            if '--summary' in sys.argv:
-                rows = db.execute("SELECT substr(json_extract(record, '$.timestamp'),1,10), json_extract(record, '$.source'), json_extract(record, '$.model'), count(*), sum(json_extract(record, '$.tokens.input_tokens')), sum(json_extract(record, '$.tokens.output_tokens')), sum(json_extract(record, '$.tokens.cached_tokens')) FROM requests GROUP BY 1,2,3 ORDER BY 1 DESC")
-                for row in rows:
-                    print(json.dumps(dict(zip(('date', 'account', 'model', 'requests', 'input_tokens', 'output_tokens', 'cached_tokens'), row))))
-                return
             keys = json.loads((ROOT / 'connection-keys.json').read_text())
             total = 0
             for _ in range(20):

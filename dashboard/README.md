@@ -9,7 +9,9 @@ Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net
 - Code (this directory): `server.py`, `ccusage_data.py`, `index.html`, `collect-usage.py`.
 - Runtime data (never in Git): `~/.config/cliproxyapi/` — `usage.sqlite3`,
   `account-pool.json`, `collector-status.json`, `dashboard/build.json`,
-  `dashboard/ccusage-snapshots/`.
+  `dashboard/ccusage-snapshots/`, `dashboard/quota-history.sqlite3` (7-day quota readings, kept 8 days).
+- Network: besides the Genius pull, `/api/upstream` asks api.github.com every five minutes whether
+  CPA has newer commits.
 - Live checkout: `~/.local/share/pool-dashboard-runtime`, a detached Git worktree pinned to a
   reviewed commit. Its Git lock only stops it from being pruned or moved; the files stay
   writable. Keeping it unedited is a convention: change it only by checking out a new

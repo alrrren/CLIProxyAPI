@@ -1,10 +1,10 @@
 """Aggregate ccusage snapshots only; no transcript or SQLite parsing."""
-import argparse
 from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -249,7 +249,7 @@ def collect(action=capture):
         start = time.monotonic()
         try:
             action()
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
             # Class name only: messages can carry snapshot or network details.
             print(f'{action.__name__} failed: {type(error).__name__}', file=sys.stderr, flush=True)
         time.sleep(max(1, 60 - (time.monotonic() - start)))
@@ -296,15 +296,4 @@ def dashboard():
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Capture local ccusage or import a Genius aggregate snapshot')
-    parser.add_argument('--import-snapshot', type=Path)
-    args = parser.parse_args()
-    if args.import_snapshot:
-        if args.import_snapshot.stat().st_size > MAX_SNAPSHOT_BYTES:
-            parser.error('Snapshot exceeds four MiB')
-        snapshot = validate(json.loads(args.import_snapshot.read_text()))
-        if snapshot['machine']['id'] != 'genius':
-            parser.error('Only Genius imports are accepted; local data comes from ccusage')
-        save(snapshot)
-    else:
-        capture()
+    capture()
