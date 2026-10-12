@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from zoneinfo import ZoneInfo
 
 # Runtime data stays in the config directory so the code can live in a Git checkout.
 STORE = Path.home() / '.config/cliproxyapi/dashboard/ccusage-snapshots'
@@ -17,6 +18,7 @@ ZONE = 'America/Mexico_City'
 COMMAND = ['daily', '--json', '--by-agent', '--offline', '--no-cost', '--timezone', ZONE]
 COUNTERS = ('inputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'outputTokens', 'totalTokens')
 SEMANTICS = 'input_excludes_cache; total=input+cacheCreation+cacheRead+output'
+last_full_capture = 0.0
 GENIUS_URL = 'https://genius.tail035f92.ts.net:8444/snapshot.json'
 MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 LIMITATIONS = [
@@ -126,7 +128,7 @@ def read(machine):
     return validate(json.loads(path.read_text())) if path.exists() else None
 
 
-def save(snapshot):
+def save(snapshot, since=None):
     snapshot = validate(snapshot)
     previous = read(snapshot['machine']['id'])
     if previous and stamp(snapshot['generatedAt']) < stamp(previous['generatedAt']):
@@ -136,7 +138,8 @@ def save(snapshot):
     for row in (previous or {}).get('rows', []):
         key = (row['app'], row['date'], row['model'])
         if (row['app'], row['date']) not in replaced and key not in incoming:
-            incoming[key] = dict(row, reportedInLatest=False)
+            # Days before a partial report's range were not asked for, so they keep the last full report's verdict.
+            incoming[key] = row if since and row['date'] < since else dict(row, reportedInLatest=False)
     snapshot['rows'] = sorted(incoming.values(), key=lambda r: (r['date'], r['app'], r['model'] or ''))
     write_json(STORE / (snapshot['machine']['id'] + '.json'), snapshot)
     return snapshot
@@ -158,13 +161,18 @@ def write_json(path, data):
 
 
 def capture():
+    global last_full_capture
     now = utcnow()
     previous = read('aleks-mbp')
+    # A full report takes seconds, so it runs hourly and after a failure; in between, recent days are enough.
+    full = not previous or previous['status'] == 'error' or time.monotonic() - last_full_capture > 3600
+    since = None if full else datetime.now(ZoneInfo(ZONE)).date() - timedelta(days=2)
     base = dict(schemaVersion=1, machine={'id': 'aleks-mbp'}, timezone=ZONE, generatedAt=now,
                 coverage=dict(counterSemantics=SEMANTICS))
     try:
-        result = subprocess.run(['/opt/homebrew/bin/ccusage', *COMMAND], capture_output=True, text=True,
-                                timeout=55, check=True)
+        result = subprocess.run(['/opt/homebrew/bin/ccusage', *COMMAND,
+                                 *(['--since', since.strftime('%Y%m%d')] if since else [])],
+                                capture_output=True, text=True, timeout=55, check=True)
         report = json.loads(result.stdout)
         version = subprocess.run(['/opt/homebrew/bin/ccusage', '--version'], capture_output=True,
                                  text=True, timeout=5, check=True).stdout.strip().split()[-1]
@@ -181,8 +189,12 @@ def capture():
                                      lastReportedAt=now, reportedInLatest=True))
                 if sum(r['totalTokens'] for r in rows if r['app'] == app['agent'] and r['date'] == day['period']) != app['totalTokens']:
                     raise ValueError('Model breakdown does not match ccusage total')
-        return save(dict(base, dataUpdatedAt=now, status='ok', rows=rows, errors=[],
-                         source=dict(tool='ccusage', version=version, offline=True, costsIncluded=False)))
+        snapshot = save(dict(base, dataUpdatedAt=now, status='ok', rows=rows, errors=[],
+                             source=dict(tool='ccusage', version=version, offline=True, costsIncluded=False)),
+                        since=since and since.isoformat())
+        if full:
+            last_full_capture = time.monotonic()
+        return snapshot
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         # save() carries the previous rows forward, marked as no longer reported.
         source = previous['source'] if previous else dict(tool='ccusage', version='unknown', offline=True,

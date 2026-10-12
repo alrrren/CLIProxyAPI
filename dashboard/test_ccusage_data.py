@@ -72,6 +72,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(result['status'],'error');self.assertEqual(result['rows'][0]['totalTokens'],10)
         self.assertNotIn('SECRET',(c.STORE/'aleks-mbp.json').read_text())
 
+    def test_partial_capture_keeps_older_days_reported(self):
+        # Aleks: "go with --since, and keep older days from looking stale".
+        today=datetime.now(c.ZoneInfo(c.ZONE)).date();old=str(today-timedelta(days=5));recent=str(today)
+        def report(*days):
+            day=lambda d:{'period':d,'agents':[dict(agent='claude',inputTokens=1,cacheReadTokens=0,cacheCreationTokens=0,outputTokens=1,totalTokens=2,modelBreakdowns=[])]}
+            return [subprocess.CompletedProcess([],0,json.dumps({'daily':[day(d) for d in days]}),''),subprocess.CompletedProcess([],0,'20.0.26\n','')]
+        with patch.object(c.subprocess,'run',side_effect=report(old,recent)):c.capture()
+        with patch.object(c.subprocess,'run',side_effect=report(recent)):rows=c.capture()['rows']
+        self.assertEqual({r['date']:r['reportedInLatest'] for r in rows},{old:True,recent:True})
+
     def test_https_pull_idempotent_failure_and_recovery(self):
         data=fixture()
         opener=unittest.mock.Mock()
