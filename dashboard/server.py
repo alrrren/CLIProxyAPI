@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
+import math
 from pathlib import Path
 import socket
 import sqlite3
@@ -49,7 +50,7 @@ def upstream_status():
 
 
 def number(value):
-    return max(0, value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < math.inf else 0
 
 
 def normalize(record):
@@ -64,8 +65,11 @@ def normalize(record):
     read = number(inp.get('cache_read_tokens')) if accurate else number(tokens.get('cache_read_tokens')) if explicit else None
     write = number(inp.get('cache_write_tokens')) if accurate else number(tokens.get('cache_creation_tokens')) if explicit else None
     timestamp = ccusage_data.stamp(record['timestamp']).astimezone(ZONE)
+    account, model = record.get('source') or 'Unknown account', record.get('model') or 'Unknown model'
+    if not (isinstance(account, str) and isinstance(model, str)):
+        raise TypeError('Stored account and model must be text')
     return dict(timestamp=timestamp.isoformat(), date=timestamp.date().isoformat(), hour=timestamp.hour,
-                account=record.get('source') or 'Unknown account', model=record.get('model') or 'Unknown model',
+                account=account, model=model,
                 input=input_total, output=output, total=total, read=read, write=write,
                 duration=number(record.get('latency_ms')) / 1000,
                 ttft=number(record.get('ttft_ms')) / 1000 if number(record.get('ttft_ms')) > 0 else None,
@@ -110,6 +114,23 @@ def readonly(path):
     return sqlite3.connect(f'file:{path}?mode=ro', uri=True)
 
 
+# json_extract stops the whole query at the first invalid record, so SQL reads fields only from valid JSON.
+RECORD = 'CASE WHEN json_valid(record) THEN record END'
+
+
+def readable(texts):
+    """Each stored record that normalizes, with its row, and how many of the rest could not be read."""
+    pairs = []
+    for (text,) in texts:
+        try:
+            # int() raises on NaN and Infinity, so Python refuses the same records SQLite's json_valid does.
+            record = json.loads(text, parse_constant=int)
+            pairs.append((record, normalize(record)))
+        except ccusage_data.MALFORMED:
+            pass
+    return pairs, len(texts) - len(pairs)
+
+
 def cpa_from_genius():
     """Daily tokens Genius sent through CPA, counted only since the collector began keeping each request's source."""
     try:
@@ -117,14 +138,14 @@ def cpa_from_genius():
     except OSError:
         return None
     with readonly(ROOT / 'usage.sqlite3') as db:
-        records = [json.loads(row[0]) for row in
-                   db.execute("SELECT record FROM requests WHERE json_extract(record, '$.client') IS NOT NULL")]
-    days, rows = {}, [(record, normalize(record)) for record in records]
+        rows, skipped = readable(db.execute(
+            f"SELECT record FROM requests WHERE json_type({RECORD}, '$.client') = 'text' OR NOT json_valid(record)").fetchall())
+    days = {}
     for record, row in rows:
         # The split subtracts this from Genius's Claude-only ccusage, so other providers must not count.
         if record['client'] in genius and record.get('provider') == 'claude' and not row['failed']:
             days[row['date']] = days.get(row['date'], 0) + row['total']
-    return dict(since=min((row['timestamp'] for _, row in rows), default=None), days=days)
+    return dict(since=min((row['timestamp'] for _, row in rows), default=None), days=days, skipped=skipped)
 
 
 class InvalidFilter(Exception):
@@ -142,13 +163,23 @@ def load(query):
     # and the exact range check below still applies.
     margin = (start - timedelta(days=1)).date().isoformat()
     with readonly(ROOT / 'usage.sqlite3') as db:
-        rows = [normalize(json.loads(row[0])) for row in
-                db.execute("SELECT record FROM requests WHERE substr(json_extract(record, '$.timestamp'), 1, 10) >= ?", (margin,))]
+        # Records without a readable date are read too, so they are counted as unreadable rather than silently dropped.
+        rows, skipped = readable(db.execute(
+            f"SELECT record FROM (SELECT record, json_extract({RECORD}, '$.timestamp') AS at FROM requests) "
+            "WHERE NOT coalesce(at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*', 0) OR substr(at, 1, 10) >= ?",
+            (margin,)).fetchall())
         options = {key: [name for (name,) in db.execute(
-            f"SELECT DISTINCT coalesce(nullif(json_extract(record, '$.{field}'), ''), ?) FROM requests ORDER BY 1", (empty,))]
+            f"SELECT DISTINCT coalesce(nullif(json_extract({RECORD}, '$.{field}'), ''), ?) FROM requests "
+            f"WHERE json_valid(record) AND coalesce(json_type({RECORD}, '$.{field}'), 'null') IN ('text', 'null') ORDER BY 1",
+            (empty,))]
             for key, field, empty in (('accounts', 'source', 'Unknown account'), ('models', 'model', 'Unknown model'))}
-        first = db.execute("SELECT min(json_extract(record, '$.timestamp')) FROM requests").fetchone()[0]
-    rows = [r for r in rows if start <= datetime.fromisoformat(r['timestamp']) <= now]
+        stamps = []
+        for (at,) in db.execute(f"SELECT json_extract({RECORD}, '$.timestamp') FROM requests"):
+            try:
+                stamps.append(ccusage_data.stamp(at))
+            except ccusage_data.MALFORMED:
+                pass
+    rows = [r for _, r in rows if start <= datetime.fromisoformat(r['timestamp']) <= now]
     for field in ('account', 'model'):
         selected = query.get(field, [''])[0]
         if selected:
@@ -169,8 +200,8 @@ def load(query):
     age = max(0, (now - datetime.fromisoformat(stamp)).total_seconds()) if stamp else None
     data = dict(summary=summarize(rows), account_activity=account_activity(rows), groups=groups, daily=daily, hours=hours, options=options,
                 recent=sorted(rows, key=lambda r: r['timestamp'], reverse=True)[:100],
-                generated=now.isoformat(), collector_age=age,
-                history_start=first and ccusage_data.stamp(first).astimezone(ZONE).isoformat())
+                generated=now.isoformat(), collector_age=age, skipped=skipped,
+                history_start=min(stamps).astimezone(ZONE).isoformat() if stamps else None)
     return data, rows
 
 
