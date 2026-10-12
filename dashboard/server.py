@@ -27,7 +27,7 @@ def upstream_status():
         result = dict(status='unknown', checked_at=datetime.now(ZONE).isoformat())
         try:
             build = json.loads((ROOT / 'dashboard/build.json').read_text())
-            result = dict(build, **result)
+            result['version'] = build['version']
             def github(path):
                 request = Request('https://api.github.com/repos/router-for-me/CLIProxyAPI/' + path,
                                   headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'CPA-Pool-Dashboard'})
@@ -39,7 +39,7 @@ def upstream_status():
             result.update(commits_behind=comparison['ahead_by'],
                           status='current' if state == 'identical' else 'outdated' if state == 'ahead' else 'diverged',
                           compare_url='https://github.com/router-for-me/CLIProxyAPI/compare/' + build['base_commit'] + '...' + tip)
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
             result['error'] = 'Upstream check unavailable; retrying in five minutes.'
         UPDATE_CACHE.update(result=result, expires=time.monotonic() + 300)
         return result
@@ -116,9 +116,10 @@ def cpa_from_genius():
     with readonly(ROOT / 'usage.sqlite3') as db:
         records = [json.loads(row[0]) for row in
                    db.execute("SELECT record FROM requests WHERE json_extract(record, '$.client') IS NOT NULL")]
-    days, rows = {}, [(record['client'], normalize(record)) for record in records]
-    for client, row in rows:
-        if client in genius and not row['failed']:
+    days, rows = {}, [(record, normalize(record)) for record in records]
+    for record, row in rows:
+        # The split subtracts this from Genius's Claude-only ccusage, so other providers must not count.
+        if record['client'] in genius and record.get('provider') == 'claude' and not row['failed']:
             days[row['date']] = days.get(row['date'], 0) + row['total']
     return dict(since=min((row['timestamp'] for _, row in rows), default=None), days=days)
 
