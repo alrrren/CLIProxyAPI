@@ -19,6 +19,8 @@ ZONE = ZoneInfo(ccusage_data.ZONE)
 UPDATE_LOCK = threading.Lock()
 UPDATE_CACHE = {}
 HISTORY = ROOT / 'dashboard/quota-history.sqlite3'
+# The listener's own names and the Tailscale Serve name that forwards to it; any other Host is a rebound DNS name.
+HOSTS = {'127.0.0.1:8320', 'localhost:8320', 'aleksmbp.tail035f92.ts.net:8321'}
 
 
 def upstream_status():
@@ -218,6 +220,10 @@ def with_history(pool):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        host = self.headers.get_all('Host') or []
+        if len(host) != 1 or host[0].lower() not in HOSTS:
+            self.send_error(403)
+            return
         parsed = urlparse(self.path)
         try:
             if parsed.path in ('/', '/index.html'):
