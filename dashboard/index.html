@@ -110,160 +110,1434 @@ footer{color:var(--muted);font-size:12px;line-height:1.7;margin-top:24px}
 <section id="requests" class="panel section"><div class="top"><div><h3>Recent requests</h3><p class="sub">Latest 100 matching records. Prompts and credentials are never displayed.</p></div><label class="check"><input type="checkbox" id="onlyFailed">Failures only</label></div><div class="overflow" tabindex="0" role="region" aria-label="Recent requests, scrollable"><table><thead><tr><th scope="col">Time</th><th scope="col">Account</th><th scope="col">Model</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cache hits</th><th scope="col" class="num">Duration</th><th scope="col">Status</th></tr></thead><tbody id="recent"></tbody></table></div><nav class="top spacer" aria-label="Recent request pages"><span id="pageInfo" class="sub" aria-live="polite"></span><div style="display:flex;gap:8px"><button id="previousPage" class="btn" type="button">Previous</button><button id="nextPage" class="btn" type="button">Next</button></div></nav></section></div>
 <footer><div id="history"></div><details><summary style="cursor:pointer">How these numbers are calculated</summary><p>Cache hit rate = cache-read tokens ÷ total input tokens, weighted by tokens rather than averaged per request. Records saved before explicit cache fields were added are excluded from that percentage. Coverage shows how many records have precise accounting.</p><p>Response time includes the entire request, including streamed output. Time to first token is shown only when the proxy reports it. Processed tokens count repeated context, including cached reads; they are not unique words or a subscription quota meter. One chat message can generate multiple requests through tools and background work.</p><p>Collection health reports the last successful poll. Missing records from outages cannot be reconstructed, and another queue consumer can remove records before this collector sees them. No historical data before collection began is included.</p></details></footer>
 </main></div><script>
-const $=id=>document.getElementById(id), fmt=n=>Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:1}).format(n||0), integer=n=>Intl.NumberFormat('en').format(n||0), pct=n=>n==null?'—':(n*100).toFixed(1)+'%', sec=n=>n==null?'—':n.toFixed(2)+'s';
-const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const TZ='America/Mexico_City';
-const short=s=>String(s??'').replace(/^claude-/,'').replace(/-(\d)-(\d)$/,' $1.$2'), name=s=>{s=String(s??'');return s.includes('@genius.com')?'Work':s.includes('@gmail.com')?'Personal':s};
-const mask=s=>{s=String(s??'');let i=s.indexOf('@');return i<1?s:s[0]+'•••'+s.slice(i)}, who=s=>$('reveal').checked?String(s??''):mask(s), label=s=>name(s)!==String(s??'')?name(s):who(s);
-let latest=null, pending=false, requestPage=0, quota=null, quotaPending=false, quotaAt=null, quotaError='';
-const PAGE_SIZE=10;
-function params(){return new URLSearchParams({days:$('days').value,account:$('account').value,model:$('model').value})}
+const $ = id => document.getElementById(id),
+  fmt = n => Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n || 0),
+  integer = n => Intl.NumberFormat('en').format(n || 0),
+  pct = n => (n == null ? '—' : (n * 100).toFixed(1) + '%'),
+  sec = n => (n == null ? '—' : n.toFixed(2) + 's');
+const escape = s =>
+  String(s ?? '').replace(
+    /[&<>"']/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+  );
+const TZ = 'America/Mexico_City';
+const short = s =>
+    String(s ?? '')
+      .replace(/^claude-/, '')
+      .replace(/-(\d)-(\d)$/, ' $1.$2'),
+  name = s => {
+    s = String(s ?? '');
+    return s.includes('@genius.com') ? 'Work' : s.includes('@gmail.com') ? 'Personal' : s;
+  };
+const mask = s => {
+    s = String(s ?? '');
+    let i = s.indexOf('@');
+    return i < 1 ? s : s[0] + '•••' + s.slice(i);
+  },
+  who = s => ($('reveal').checked ? String(s ?? '') : mask(s)),
+  label = s => (name(s) !== String(s ?? '') ? name(s) : who(s));
+let latest = null,
+  pending = false,
+  requestPage = 0,
+  quota = null,
+  quotaPending = false,
+  quotaAt = null,
+  quotaError = '';
+const PAGE_SIZE = 10;
+function params() {
+  return new URLSearchParams({ days: $('days').value, account: $('account').value, model: $('model').value });
+}
 // Keep a selected filter value that the new period no longer returns, so the filter is never silently reset.
-function options(id,values){let selected=$(id).value,list=selected&&!values.includes(selected)?[...values,selected]:values;const first=id==='account'?'All accounts':'All models';$(id).innerHTML='<option value="">'+first+'</option>'+list.map(v=>{let text=id==='account'?label(v)+(label(v)!==who(v)?' · '+who(v):''):short(v);return '<option value="'+escape(v)+'">'+escape(text+(values.includes(v)?'':' (no data in period)'))+'</option>'}).join('');$(id).value=selected}
+function options(id, values) {
+  let selected = $(id).value,
+    list = selected && !values.includes(selected) ? [...values, selected] : values;
+  const first = id === 'account' ? 'All accounts' : 'All models';
+  $(id).innerHTML =
+    '<option value="">' +
+    first +
+    '</option>' +
+    list
+      .map(v => {
+        let text = id === 'account' ? label(v) + (label(v) !== who(v) ? ' · ' + who(v) : '') : short(v);
+        return (
+          '<option value="' +
+          escape(v) +
+          '">' +
+          escape(text + (values.includes(v) ? '' : ' (no data in period)')) +
+          '</option>'
+        );
+      })
+      .join('');
+  $(id).value = selected;
+}
 // Stacked daily bars; each series is [name, value(row), color].
-function bars(rows,series,label){let width=800,height=220,left=52,right=16,bottom=34,top=16,plot=height-bottom-top,max=Math.max(...rows.map(r=>series.reduce((n,part)=>n+part[1](r),0)),1),step=(width-left-right)/Math.max(rows.length,1),bar=Math.min(42,step*.68);let svg='<svg viewBox="0 0 '+width+' '+height+'" role="img" aria-label="'+escape(label)+'">';for(let i=0;i<4;i++){let y=top+plot*i/3;svg+='<line x1="'+left+'" x2="'+(width-right)+'" y1="'+y+'" y2="'+y+'" stroke="#22262e"/><text x="'+(left-8)+'" y="'+(y+4)+'" text-anchor="end" class="chart-axis">'+fmt(max*(1-i/3))+'</text>'}rows.forEach((r,i)=>{let x=left+step*i+(step-bar)/2,y=top+plot;svg+='<g>'+series.map(part=>{let v=part[1](r),h=v/max*plot;y-=h;return '<rect x="'+x+'" y="'+y+'" width="'+bar+'" height="'+h+'" rx="2" fill="'+part[2]+'"><title>'+escape(part[0])+' · '+escape(r.date)+' · '+fmt(v)+' tokens'+(r.requests!=null?' · '+integer(r.requests)+' requests that day':'')+'</title></rect>'}).join('')+'</g>';if(rows.length<=7||i%Math.ceil(rows.length/6)===0||i===rows.length-1)svg+='<text x="'+(x+bar/2)+'" y="'+(height-9)+'" text-anchor="middle" class="chart-axis">'+escape(String(r.date).slice(5))+'</text>'});return svg+'</svg>'}
-function trend(rows,cache=false){return bars(rows,cache?[['reads',r=>r.cached,'#74dbc4'],['writes',r=>r.cache_write,'#e3b25f']]:[['input',r=>r.input,'#74dbc4'],['output',r=>r.output,'#e3b25f']],cache?'Daily cache read and write tokens':'Daily input and output token usage')}
-function histogram(rows){let bounds=[2,5,10,30,Infinity],counts=bounds.map((limit,i)=>rows.filter(r=>r.duration>=([0,...bounds][i])&&r.duration<limit).length),labels=['<2s','2–5s','5–10s','10–30s','30s+'],max=Math.max(...counts,1);return '<svg viewBox="0 0 380 105" role="img" aria-label="Request duration histogram">'+counts.map((n,i)=>'<g><title>'+labels[i]+': '+n+' requests</title><rect x="'+(i*75+12)+'" y="'+(73-n/max*55)+'" width="48" height="'+(n/max*55)+'" rx="4" fill="#7ca4d6"/><text x="'+(i*75+36)+'" y="'+(66-n/max*55)+'" text-anchor="middle" class="chart-axis">'+n+'</text><text x="'+(i*75+36)+'" y="96" text-anchor="middle" class="chart-axis">'+labels[i]+'</text></g>').join('')+'</svg>'}
-function recent(){let rows=latest.recent.filter(r=>!$('onlyFailed').checked||r.failed);requestPage=Math.min(requestPage,Math.max(0,Math.ceil(rows.length/PAGE_SIZE)-1));let start=requestPage*PAGE_SIZE;let page=rows.slice(start,start+PAGE_SIZE);$('pageInfo').textContent=rows.length?'Showing '+(start+1)+'–'+Math.min(start+PAGE_SIZE,rows.length)+' of '+rows.length+' · Page '+(requestPage+1)+' of '+Math.ceil(rows.length/PAGE_SIZE):'0 requests';$('previousPage').disabled=requestPage===0;$('nextPage').disabled=start+PAGE_SIZE>=rows.length;$('recent').innerHTML=page.length?page.map(r=>'<tr><td>'+new Date(r.timestamp).toLocaleString('en',{timeZone:TZ,month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+'</td><td title="'+escape(who(r.account))+'">'+escape(label(r.account))+'</td><td>'+escape(short(r.model))+'</td><td class="num">'+fmt(r.total)+'</td><td class="num">'+pct(r.read==null||!r.input?null:r.read/r.input)+'</td><td class="num">'+sec(r.duration)+'</td><td><span class="tag '+(r.failed?'error':'')+'">'+(r.failed?'Failed'+(r.status?' · '+escape(r.status):''):'Success')+'</span></td></tr>').join(''):'<tr><td colspan="7" class="empty">No matching requests.</td></tr>'}
-function render(d){latest=d;options('account',d.options.accounts);options('model',d.options.models);let s=d.summary;$('total').textContent=fmt(s.total);$('split').textContent=fmt(s.input)+' input · '+fmt(s.output)+' output';$('cache').textContent=pct(s.cache_rate);$('coverage').textContent=fmt(s.cached)+' reused · precise data for '+s.cache_covered+'/'+s.requests+' requests';$('latency').textContent=sec(s.p50);$('p95').textContent='P95 '+sec(s.p95)+' · full request duration';$('failures').textContent=integer(s.failures);$('requestCount').textContent=pct(s.requests?s.failures/s.requests:null)+' failure rate · '+integer(s.requests)+' requests';$('trend').innerHTML=trend(d.daily);$('cacheTrend').innerHTML=s.cache_covered?trend(d.daily,true):'<div class="empty">No precise cache accounting in this period.</div>';$('cacheTotals').textContent=fmt(s.cached)+' read · '+fmt(s.cache_write)+' written · precise data for '+s.cache_covered+'/'+s.requests+' requests';$('accountChanges').textContent=integer(d.account_activity.changes)+' changes';$('accountChangeDetail').textContent=integer(d.account_activity.comparisons)+' comparable request pairs'+(d.account_activity.last_change?' · last change '+new Date(d.account_activity.last_change).toLocaleString('en',{timeZone:TZ}):' · no account change observed');$('accountCount').textContent=d.groups.account.length+' active in period';$('distribution-accounts').innerHTML=d.groups.account.length?d.groups.account.map(a=>'<div class="account-row"><div class="top"><strong class="'+(name(a.name)==='Work'?'work':'')+'">'+escape(label(a.name))+'</strong><span class="muted">'+pct(s.total?a.total/s.total:null)+'</span></div><div class="sub">'+escape(who(a.name))+'</div><div class="meter" aria-hidden="true"><span style="width:'+(s.total?a.total/s.total*100:0)+'%;background:'+(name(a.name)==='Work'?'var(--amber)':'var(--aqua)')+'"></span></div><div class="mini-grid"><div><div class="value">'+fmt(a.total)+'</div><div class="sub">tokens</div></div><div><div class="value">'+integer(a.requests)+'</div><div class="sub">requests</div></div><div><div class="value">'+pct(a.cache_rate)+'</div><div class="sub">cache hits</div></div></div></div>').join(''):'<div class="empty">No usage in this period.</div>';$('modelCount').textContent=d.groups.model.length+' models';$('models-body').innerHTML=d.groups.model.length?d.groups.model.sort((a,b)=>b.total-a.total).map(m=>'<tr><td><strong>'+escape(short(m.name))+'</strong></td><td class="num">'+integer(m.requests)+'</td><td class="num">'+fmt(m.input)+'</td><td class="num">'+fmt(m.output)+'</td><td class="num">'+pct(m.cache_rate)+'</td><td class="num">'+sec(m.p50)+'</td><td class="num">'+sec(m.p95)+'</td><td class="num">'+integer(m.failures)+'</td></tr>').join(''):'<tr><td colspan="8" class="empty">No matching models.</td></tr>';let max=Math.max(...d.hours,1);$('hours').innerHTML=d.hours.map((n,i)=>'<div class="heat-cell" title="'+i+':00 · '+n+' requests" style="background:rgba(116,219,196,'+(.06+n/max*.6)+')">'+(n||'')+'</div>').join('');$('peak').textContent=s.requests?'Busiest hour: '+String(d.hours.indexOf(Math.max(...d.hours))).padStart(2,'0')+':00 · '+Math.max(...d.hours)+' requests':'No activity in this period';$('distribution').innerHTML=histogram(d.recent);$('ttft').textContent='Median first token: '+sec(s.ttft)+' · reported for '+s.ttft_covered+'/'+s.requests+' requests';recent();let healthy=d.collector_age!=null&&d.collector_age<60;$('health').innerHTML='<span class="badge-dot" style="background:'+(healthy?'var(--green)':'var(--amber)')+'"></span>'+(healthy?'Collector running · '+Math.round(d.collector_age)+'s since poll':'Collector stale · check AleksMBP');$('updated').textContent='Updated '+new Date(d.generated).toLocaleTimeString('en',{timeZone:TZ,hour:'2-digit',minute:'2-digit',second:'2-digit'});$('history').textContent='History begins '+(d.history_start?new Date(d.history_start).toLocaleString('en',{timeZone:TZ}):'when the first request is saved')+'. Refreshes every 20 seconds. Times shown in Mexico City.';$('export').href='/api/export.csv?'+params()}
-async function refresh(){if(pending)return;pending=true;$('refresh').disabled=true;try{let res=await fetch('/api/data?'+params());if(!res.ok)throw Error('Dashboard data is temporarily unavailable ('+res.status+').');render(await res.json());$('problem').classList.add('hide')}catch(e){$('problem').textContent=e.message;$('problem').classList.remove('hide');$('health').textContent='Connection unavailable · showing last loaded data'}finally{pending=false;$('refresh').disabled=false}}
+function bars(rows, series, label) {
+  let width = 800,
+    height = 220,
+    left = 52,
+    right = 16,
+    bottom = 34,
+    top = 16,
+    plot = height - bottom - top,
+    max = Math.max(...rows.map(r => series.reduce((n, part) => n + part[1](r), 0)), 1),
+    step = (width - left - right) / Math.max(rows.length, 1),
+    bar = Math.min(42, step * 0.68);
+  let svg = '<svg viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="' + escape(label) + '">';
+  for (let i = 0; i < 4; i++) {
+    let y = top + (plot * i) / 3;
+    svg +=
+      '<line x1="' +
+      left +
+      '" x2="' +
+      (width - right) +
+      '" y1="' +
+      y +
+      '" y2="' +
+      y +
+      '" stroke="#22262e"/><text x="' +
+      (left - 8) +
+      '" y="' +
+      (y + 4) +
+      '" text-anchor="end" class="chart-axis">' +
+      fmt(max * (1 - i / 3)) +
+      '</text>';
+  }
+  rows.forEach((r, i) => {
+    let x = left + step * i + (step - bar) / 2,
+      y = top + plot;
+    svg +=
+      '<g>' +
+      series
+        .map(part => {
+          let v = part[1](r),
+            h = (v / max) * plot;
+          y -= h;
+          return (
+            '<rect x="' +
+            x +
+            '" y="' +
+            y +
+            '" width="' +
+            bar +
+            '" height="' +
+            h +
+            '" rx="2" fill="' +
+            part[2] +
+            '"><title>' +
+            escape(part[0]) +
+            ' · ' +
+            escape(r.date) +
+            ' · ' +
+            fmt(v) +
+            ' tokens' +
+            (r.requests != null ? ' · ' + integer(r.requests) + ' requests that day' : '') +
+            '</title></rect>'
+          );
+        })
+        .join('') +
+      '</g>';
+    if (rows.length <= 7 || i % Math.ceil(rows.length / 6) === 0 || i === rows.length - 1)
+      svg +=
+        '<text x="' +
+        (x + bar / 2) +
+        '" y="' +
+        (height - 9) +
+        '" text-anchor="middle" class="chart-axis">' +
+        escape(String(r.date).slice(5)) +
+        '</text>';
+  });
+  return svg + '</svg>';
+}
+function trend(rows, cache = false) {
+  return bars(
+    rows,
+    cache
+      ? [
+          ['reads', r => r.cached, '#74dbc4'],
+          ['writes', r => r.cache_write, '#e3b25f'],
+        ]
+      : [
+          ['input', r => r.input, '#74dbc4'],
+          ['output', r => r.output, '#e3b25f'],
+        ],
+    cache ? 'Daily cache read and write tokens' : 'Daily input and output token usage',
+  );
+}
+function histogram(rows) {
+  let bounds = [2, 5, 10, 30, Infinity],
+    counts = bounds.map((limit, i) => rows.filter(r => r.duration >= [0, ...bounds][i] && r.duration < limit).length),
+    labels = ['<2s', '2–5s', '5–10s', '10–30s', '30s+'],
+    max = Math.max(...counts, 1);
+  return (
+    '<svg viewBox="0 0 380 105" role="img" aria-label="Request duration histogram">' +
+    counts
+      .map(
+        (n, i) =>
+          '<g><title>' +
+          labels[i] +
+          ': ' +
+          n +
+          ' requests</title><rect x="' +
+          (i * 75 + 12) +
+          '" y="' +
+          (73 - (n / max) * 55) +
+          '" width="48" height="' +
+          (n / max) * 55 +
+          '" rx="4" fill="#7ca4d6"/><text x="' +
+          (i * 75 + 36) +
+          '" y="' +
+          (66 - (n / max) * 55) +
+          '" text-anchor="middle" class="chart-axis">' +
+          n +
+          '</text><text x="' +
+          (i * 75 + 36) +
+          '" y="96" text-anchor="middle" class="chart-axis">' +
+          labels[i] +
+          '</text></g>',
+      )
+      .join('') +
+    '</svg>'
+  );
+}
+function recent() {
+  let rows = latest.recent.filter(r => !$('onlyFailed').checked || r.failed);
+  requestPage = Math.min(requestPage, Math.max(0, Math.ceil(rows.length / PAGE_SIZE) - 1));
+  let start = requestPage * PAGE_SIZE;
+  let page = rows.slice(start, start + PAGE_SIZE);
+  $('pageInfo').textContent = rows.length
+    ? 'Showing ' +
+      (start + 1) +
+      '–' +
+      Math.min(start + PAGE_SIZE, rows.length) +
+      ' of ' +
+      rows.length +
+      ' · Page ' +
+      (requestPage + 1) +
+      ' of ' +
+      Math.ceil(rows.length / PAGE_SIZE)
+    : '0 requests';
+  $('previousPage').disabled = requestPage === 0;
+  $('nextPage').disabled = start + PAGE_SIZE >= rows.length;
+  $('recent').innerHTML = page.length
+    ? page
+        .map(
+          r =>
+            '<tr><td>' +
+            new Date(r.timestamp).toLocaleString('en', {
+              timeZone: TZ,
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: false,
+            }) +
+            '</td><td title="' +
+            escape(who(r.account)) +
+            '">' +
+            escape(label(r.account)) +
+            '</td><td>' +
+            escape(short(r.model)) +
+            '</td><td class="num">' +
+            fmt(r.total) +
+            '</td><td class="num">' +
+            pct(r.read == null || !r.input ? null : r.read / r.input) +
+            '</td><td class="num">' +
+            sec(r.duration) +
+            '</td><td><span class="tag ' +
+            (r.failed ? 'error' : '') +
+            '">' +
+            (r.failed ? 'Failed' + (r.status ? ' · ' + escape(r.status) : '') : 'Success') +
+            '</span></td></tr>',
+        )
+        .join('')
+    : '<tr><td colspan="7" class="empty">No matching requests.</td></tr>';
+}
+function render(d) {
+  latest = d;
+  options('account', d.options.accounts);
+  options('model', d.options.models);
+  let s = d.summary;
+  $('total').textContent = fmt(s.total);
+  $('split').textContent = fmt(s.input) + ' input · ' + fmt(s.output) + ' output';
+  $('cache').textContent = pct(s.cache_rate);
+  $('coverage').textContent =
+    fmt(s.cached) + ' reused · precise data for ' + s.cache_covered + '/' + s.requests + ' requests';
+  $('latency').textContent = sec(s.p50);
+  $('p95').textContent = 'P95 ' + sec(s.p95) + ' · full request duration';
+  $('failures').textContent = integer(s.failures);
+  $('requestCount').textContent =
+    pct(s.requests ? s.failures / s.requests : null) + ' failure rate · ' + integer(s.requests) + ' requests';
+  $('trend').innerHTML = trend(d.daily);
+  $('cacheTrend').innerHTML = s.cache_covered
+    ? trend(d.daily, true)
+    : '<div class="empty">No precise cache accounting in this period.</div>';
+  $('cacheTotals').textContent =
+    fmt(s.cached) +
+    ' read · ' +
+    fmt(s.cache_write) +
+    ' written · precise data for ' +
+    s.cache_covered +
+    '/' +
+    s.requests +
+    ' requests';
+  $('accountChanges').textContent = integer(d.account_activity.changes) + ' changes';
+  $('accountChangeDetail').textContent =
+    integer(d.account_activity.comparisons) +
+    ' comparable request pairs' +
+    (d.account_activity.last_change
+      ? ' · last change ' + new Date(d.account_activity.last_change).toLocaleString('en', { timeZone: TZ })
+      : ' · no account change observed');
+  $('accountCount').textContent = d.groups.account.length + ' active in period';
+  $('distribution-accounts').innerHTML = d.groups.account.length
+    ? d.groups.account
+        .map(
+          a =>
+            '<div class="account-row"><div class="top"><strong class="' +
+            (name(a.name) === 'Work' ? 'work' : '') +
+            '">' +
+            escape(label(a.name)) +
+            '</strong><span class="muted">' +
+            pct(s.total ? a.total / s.total : null) +
+            '</span></div><div class="sub">' +
+            escape(who(a.name)) +
+            '</div><div class="meter" aria-hidden="true"><span style="width:' +
+            (s.total ? (a.total / s.total) * 100 : 0) +
+            '%;background:' +
+            (name(a.name) === 'Work' ? 'var(--amber)' : 'var(--aqua)') +
+            '"></span></div><div class="mini-grid"><div><div class="value">' +
+            fmt(a.total) +
+            '</div><div class="sub">tokens</div></div><div><div class="value">' +
+            integer(a.requests) +
+            '</div><div class="sub">requests</div></div><div><div class="value">' +
+            pct(a.cache_rate) +
+            '</div><div class="sub">cache hits</div></div></div></div>',
+        )
+        .join('')
+    : '<div class="empty">No usage in this period.</div>';
+  $('modelCount').textContent = d.groups.model.length + ' models';
+  $('models-body').innerHTML = d.groups.model.length
+    ? d.groups.model
+        .sort((a, b) => b.total - a.total)
+        .map(
+          m =>
+            '<tr><td><strong>' +
+            escape(short(m.name)) +
+            '</strong></td><td class="num">' +
+            integer(m.requests) +
+            '</td><td class="num">' +
+            fmt(m.input) +
+            '</td><td class="num">' +
+            fmt(m.output) +
+            '</td><td class="num">' +
+            pct(m.cache_rate) +
+            '</td><td class="num">' +
+            sec(m.p50) +
+            '</td><td class="num">' +
+            sec(m.p95) +
+            '</td><td class="num">' +
+            integer(m.failures) +
+            '</td></tr>',
+        )
+        .join('')
+    : '<tr><td colspan="8" class="empty">No matching models.</td></tr>';
+  let max = Math.max(...d.hours, 1);
+  $('hours').innerHTML = d.hours
+    .map(
+      (n, i) =>
+        '<div class="heat-cell" title="' +
+        i +
+        ':00 · ' +
+        n +
+        ' requests" style="background:rgba(116,219,196,' +
+        (0.06 + (n / max) * 0.6) +
+        ')">' +
+        (n || '') +
+        '</div>',
+    )
+    .join('');
+  $('peak').textContent = s.requests
+    ? 'Busiest hour: ' +
+      String(d.hours.indexOf(Math.max(...d.hours))).padStart(2, '0') +
+      ':00 · ' +
+      Math.max(...d.hours) +
+      ' requests'
+    : 'No activity in this period';
+  $('distribution').innerHTML = histogram(d.recent);
+  $('ttft').textContent =
+    'Median first token: ' + sec(s.ttft) + ' · reported for ' + s.ttft_covered + '/' + s.requests + ' requests';
+  recent();
+  let healthy = d.collector_age != null && d.collector_age < 60;
+  $('health').innerHTML =
+    '<span class="badge-dot" style="background:' +
+    (healthy ? 'var(--green)' : 'var(--amber)') +
+    '"></span>' +
+    (healthy
+      ? 'Collector running · ' + Math.round(d.collector_age) + 's since poll'
+      : 'Collector stale · check AleksMBP');
+  $('updated').textContent =
+    'Updated ' +
+    new Date(d.generated).toLocaleTimeString('en', {
+      timeZone: TZ,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  $('history').textContent =
+    'History begins ' +
+    (d.history_start
+      ? new Date(d.history_start).toLocaleString('en', { timeZone: TZ })
+      : 'when the first request is saved') +
+    '. Refreshes every 20 seconds. Times shown in Mexico City.';
+  $('export').href = '/api/export.csv?' + params();
+}
+async function refresh() {
+  if (pending) return;
+  pending = true;
+  $('refresh').disabled = true;
+  try {
+    let res = await fetch('/api/data?' + params());
+    if (!res.ok) throw Error('Dashboard data is temporarily unavailable (' + res.status + ').');
+    render(await res.json());
+    $('problem').classList.add('hide');
+  } catch (e) {
+    $('problem').textContent = e.message;
+    $('problem').classList.remove('hide');
+    $('health').textContent = 'Connection unavailable · showing last loaded data';
+  } finally {
+    pending = false;
+    $('refresh').disabled = false;
+  }
+}
 
-const human=s=>{s=String(s??'').replace(/[-_]+/g,' ').trim();return s&&s[0].toUpperCase()+s.slice(1)};
-const time=t=>Date.parse(t??''), span=ms=>{let m=Math.floor(Math.abs(ms)/60000),d=Math.floor(m/1440),h=Math.floor(m%1440/60);return d?d+'d '+h+'h':h?h+'h '+m%60+'m':m?m+'m':'<1m'};
-const clock=t=>new Date(t).toLocaleString('en',{timeZone:TZ,weekday:'short',hour:'2-digit',minute:'2-digit',hour12:false});
+const human = s => {
+  s = String(s ?? '')
+    .replace(/[-_]+/g, ' ')
+    .trim();
+  return s && s[0].toUpperCase() + s.slice(1);
+};
+const time = t => Date.parse(t ?? ''),
+  span = ms => {
+    let m = Math.floor(Math.abs(ms) / 60000),
+      d = Math.floor(m / 1440),
+      h = Math.floor((m % 1440) / 60);
+    return d ? d + 'd ' + h + 'h' : h ? h + 'h ' + (m % 60) + 'm' : m ? m + 'm' : '<1m';
+  };
+const clock = t =>
+  new Date(t).toLocaleString('en', {
+    timeZone: TZ,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
 // A window is only trusted while its reset is in the future; afterwards the old reading says nothing about the new window.
 // Genius reports only while Claude Code runs there, and that is where the work account is used, so an idle reading still holds.
-function windowState(a,w,now){if(a.disabled)return{kind:'off'};if(!w||typeof w.utilization!=='number'||!isFinite(w.utilization))return{kind:'none'};let reset=time(w.resets_at);if(!isFinite(reset))return{kind:'none'};if(reset<=now)return{kind:'expired',reset};let seen=time(a.observed_at),recent=!a.quota_error&&isFinite(seen)&&(a.via==='genius'||now-seen<=660000);
-// A failed refresh makes every saved reading unverified; recent keeps the last measured share available.
-return{kind:recent&&!quotaError&&!quota?.error?'live':'stale',recent,left:Math.min(1,Math.max(0,1-w.utilization)),reset,status:String(w.status??'')}}
-function quotaMeter(title,st,now){let value,note,tone='off';if(st.kind==='off'){value='Unavailable';note='Account disabled'}else if(st.kind==='none'){value='—';note='No reading yet'}else if(st.kind==='expired'){value='—';note='Window reset '+span(now-st.reset)+' ago · awaiting new reading'}else{tone=st.status==='rejected'||st.left<=0?'bad':/warn/.test(st.status)||st.left<.25?'warn':'ok';value=Math.round(st.left*100)+'% left';note=(isFinite(st.reset)?'Resets in '+span(st.reset-now)+' · '+clock(st.reset):'Reset time unknown')+(st.kind==='stale'?' · unverified':'')}
-let flag=st.status&&st.status!=='allowed'?' <span class="chip '+(st.status==='rejected'?'bad':'warn')+'">'+escape(human(st.status))+'</span>':'';
-return '<div><div class="q-head"><span>'+title+'</span><strong class="'+(st.kind==='live'?'':'dim')+'">'+value+'</strong></div><div class="qbar '+(tone==='off'?'off':tone==='ok'?'':tone)+(st.kind==='stale'?' dim':'')+'" aria-hidden="true">'+(tone==='off'?'':'<span style="width:'+(st.left*100).toFixed(1)+'%"></span>')+'</div><div class="sub">'+note+flag+'</div></div>'}
-const WEEK=604800000;
-const DAY=86400000, COLORS=['var(--aqua)','var(--amber)','var(--blue)','var(--green)'];
+function windowState(a, w, now) {
+  if (a.disabled) return { kind: 'off' };
+  if (!w || typeof w.utilization !== 'number' || !isFinite(w.utilization)) return { kind: 'none' };
+  let reset = time(w.resets_at);
+  if (!isFinite(reset)) return { kind: 'none' };
+  if (reset <= now) return { kind: 'expired', reset };
+  let seen = time(a.observed_at),
+    recent = !a.quota_error && isFinite(seen) && (a.via === 'genius' || now - seen <= 660000);
+  // A failed refresh makes every saved reading unverified; recent keeps the last measured share available.
+  return {
+    kind: recent && !quotaError && !quota?.error ? 'live' : 'stale',
+    recent,
+    left: Math.min(1, Math.max(0, 1 - w.utilization)),
+    reset,
+    status: String(w.status ?? ''),
+  };
+}
+function quotaMeter(title, st, now) {
+  let value,
+    note,
+    tone = 'off';
+  if (st.kind === 'off') {
+    value = 'Unavailable';
+    note = 'Account disabled';
+  } else if (st.kind === 'none') {
+    value = '—';
+    note = 'No reading yet';
+  } else if (st.kind === 'expired') {
+    value = '—';
+    note = 'Window reset ' + span(now - st.reset) + ' ago · awaiting new reading';
+  } else {
+    tone = st.status === 'rejected' || st.left <= 0 ? 'bad' : /warn/.test(st.status) || st.left < 0.25 ? 'warn' : 'ok';
+    value = Math.round(st.left * 100) + '% left';
+    note =
+      (isFinite(st.reset) ? 'Resets in ' + span(st.reset - now) + ' · ' + clock(st.reset) : 'Reset time unknown') +
+      (st.kind === 'stale' ? ' · unverified' : '');
+  }
+  let flag =
+    st.status && st.status !== 'allowed'
+      ? ' <span class="chip ' +
+        (st.status === 'rejected' ? 'bad' : 'warn') +
+        '">' +
+        escape(human(st.status)) +
+        '</span>'
+      : '';
+  return (
+    '<div><div class="q-head"><span>' +
+    title +
+    '</span><strong class="' +
+    (st.kind === 'live' ? '' : 'dim') +
+    '">' +
+    value +
+    '</strong></div><div class="qbar ' +
+    (tone === 'off' ? 'off' : tone === 'ok' ? '' : tone) +
+    (st.kind === 'stale' ? ' dim' : '') +
+    '" aria-hidden="true">' +
+    (tone === 'off' ? '' : '<span style="width:' + (st.left * 100).toFixed(1) + '%"></span>') +
+    '</div><div class="sub">' +
+    note +
+    flag +
+    '</div></div>'
+  );
+}
+const WEEK = 604800000;
+const DAY = 86400000,
+  COLORS = ['var(--aqua)', 'var(--amber)', 'var(--blue)', 'var(--green)'];
 // Pace follows this window's stored readings from the last day once they span three hours; before that it is the average
 // since the window began, assuming it opened 7 days before its reset.
-function pace(a,st,now){let seen=time(a.observed_at),first=(a.history||[]).find(p=>p[0]>=now-DAY);if(first&&seen-first[0]>=3*3600000)return{rate:Math.max(0,(1-st.left-first[1])/(seen-first[0])),basis:'over the last '+span(seen-first[0])};let elapsed=now-(st.reset-WEEK);return{rate:elapsed>=3600000?(1-st.left)/elapsed:null,basis:'since its window began'}}
-let quotaProvider='', quotaView='remaining', outlookPeek=null;
-function renderOutlook(on,now){outlookPeek=null;let read=on.map(a=>({a,st:windowState(a,a.seven_day,now)})),live=read.filter(x=>x.st.kind==='live'),held=read.filter(x=>x.st.recent);
-// A failed refresh keeps the last measured share visible but must not feed any estimate.
-if(!live.length&&held.length&&(quotaError||quota.error)){$('outlookLeft').textContent=Math.round(held.reduce((n,x)=>n+x.st.left,0)*100)+'%';$('outlookOf').textContent='/ '+held.length*100+'% remaining · last measured';$('outlookRate').textContent='';$('outlookNext').textContent='';$('outlookChart').innerHTML='<div class="empty">Forecast paused · the latest quota refresh failed, so no estimate is drawn from older readings.</div>';$('outlookNote').textContent='';$('outlookKey').textContent='';return}
-if(!live.length){$('outlookLeft').textContent='—';$('outlookOf').textContent='No current 7-day reading';$('outlookRate').textContent='';$('outlookNext').textContent='';$('outlookChart').innerHTML='<div class="empty">Forecast unavailable · it needs a fresh 7-day reading from at least one enabled account.</div>';$('outlookNote').textContent='';$('outlookKey').textContent='';return}
-live.forEach((x,i)=>Object.assign(x,pace(x.a,x.st,now),{color:COLORS[i%COLORS.length]}));let known=live.filter(x=>x.rate!=null),capacity=live.length,end=now+Number($('outlookHorizon').value||7)*86400000;
-// After its known reset an account restarts at 100% and drains at the same estimated pace; a 7-day horizon cannot hold a second reset.
-const one=(x,t)=>{let r=x.rate||0;return t<x.st.reset?Math.max(0,x.st.left-(t-now)*r):Math.max(0,1-(t-x.st.reset)*r)}, at=t=>live.reduce((n,x)=>n+one(x,t),0);
-// Before now each account shows its stored readings: the latest one at or before that moment, or nothing if none is that old.
-const measured=(x,t)=>{let p=(x.a.history||[]).filter(p=>p[0]<=t).pop();return t>=now?x.st.left:p?1-p[1]:null}, past=t=>{let v=live.map(x=>measured(x,t));return v.includes(null)?null:v.reduce((n,y)=>n+y,0)};
-$('outlookLeft').textContent=Math.round(at(now)*100)+'%';$('outlookOf').textContent='/ '+capacity*100+'% remaining';
-$('outlookRate').textContent=known.length?'~'+(known.reduce((n,x)=>n+x.rate,0)*360000000).toFixed(1)+'% per hour · estimate':'Pace unknown';
-const runsOut=x=>x.rate>0&&now+x.st.left/x.rate<x.st.reset?now+x.st.left/x.rate:null;
-let next=live.slice().sort((x,y)=>x.st.reset-y.st.reset)[0],nextOut=runsOut(next);$('outlookNext').textContent='Next reset: '+label(next.a.name)+' · '+clock(next.st.reset)+' · '+(next.rate==null?'pace unknown':nextOut?'runs out first, ~'+clock(nextOut):'~'+Math.round((next.st.left-(next.st.reset-now)*next.rate)*100)+'% left at reset')+' · estimate';
-$('outlookKey').textContent=(quotaView==='drain'?'Pace = share of the week used ÷ time · ':'Solid = stored readings · dashed = estimate at each account\'s pace · ')+live.map(x=>label(x.a.name)+' pace '+x.basis).join(' · ');
-if(quotaView==='drain'){$('outlookChart').innerHTML=live.map(x=>{let start=x.st.reset-WEEK,used=1-x.st.left,out=runsOut(x);return '<div class="share"><span>'+escape(label(x.a.name))+'</span><strong>'+(x.rate==null?'Pace unknown':'~'+(x.rate*360000000).toFixed(2)+'% of its week per hour · '+x.basis)+'</strong><div class="meter" role="img" aria-label="'+Math.round(used*100)+'% of the week used"><span style="width:'+(used*100).toFixed(1)+'%;background:var(--clay)"></span></div><div class="sub" style="grid-column:1/-1">Used '+Math.round(used*100)+'% in '+span(now-start)+' since '+escape(clock(start))+' · '+(x.rate==null?'window began under an hour ago':out?'at this pace runs out ~'+escape(clock(out))+', '+span(x.st.reset-out)+' before its reset':'at this pace ~'+Math.round((x.st.left-(x.st.reset-now)*x.rate)*100)+'% left at its reset '+escape(clock(x.st.reset)))+' · estimate</div></div>'}).join('')}
-else{let width=Math.max(320,$('outlookChart').clientWidth||1200),height=260,left=56,right=16,top=20,bottom=34,plot=height-top-bottom,stamps=live.flatMap(x=>(x.a.history||[]).map(p=>p[0])).filter(t=>t>=now-DAY&&t<now),begin=stamps.some(t=>t<now-3600000)?Math.min(...stamps):now,X=t=>left+(t-begin)/(end-begin)*(width-left-right),Y=v=>top+plot*(1-v/capacity),times=[];
-for(let i=0;i<=160;i++)times.push(now+(end-now)*i/160);for(const x of live)if(x.st.reset<end)times.push(x.st.reset-1,x.st.reset);times.sort((a,b)=>a-b);
-const path=(ts,f)=>ts.map(t=>[t,f(t)]).filter(([,v])=>v!=null).map(([t,v],i)=>(i?'L':'M')+X(t).toFixed(1)+' '+Y(v).toFixed(1)).join(' '), before=[...new Set([...stamps,now])].sort((a,b)=>a-b);
-let line=path(times,at), dash=' fill="none" stroke-dasharray="7 6"';
-let svg='<svg viewBox="0 0 '+width+' '+height+'" role="img" aria-label="Stored and projected remaining weekly quota per account and in total until '+escape(clock(end))+', projection is an estimate">';
-for(let i=0;i<=4;i++){let y=top+plot*i/4;svg+='<line x1="'+left+'" x2="'+(width-right)+'" y1="'+y+'" y2="'+y+'" stroke="#22262e"/><text x="'+(left-10)+'" y="'+(y+4)+'" text-anchor="end" class="chart-axis">'+Math.round(capacity*100*(1-i/4))+'%</text>'}
-for(const x of live)if(x.st.reset<end)svg+='<line x1="'+X(x.st.reset)+'" x2="'+X(x.st.reset)+'" y1="'+top+'" y2="'+(top+plot)+'" stroke="#3a404a" stroke-dasharray="2 4"/><text x="'+(X(x.st.reset)+(X(x.st.reset)>width*.75?-6:6))+'" y="'+(top+12)+'" text-anchor="'+(X(x.st.reset)>width*.75?'end':'start')+'" class="chart-axis">Reset · '+escape(label(x.a.name))+'</text>';
-for(let i=width<600?2:1;i<=4;i+=width<600?2:1){let t=begin+(end-begin)*i/4;svg+='<text x="'+X(t)+'" y="'+(height-9)+'" text-anchor="'+(i===4?'end':'middle')+'" class="chart-axis">'+escape(clock(t))+'</text>'}
-svg+='<line x1="'+X(now)+'" x2="'+X(now)+'" y1="'+top+'" y2="'+(top+plot)+'" stroke="#6b7280" stroke-dasharray="2 4"/><text x="'+(X(now)+8)+'" y="'+(top+12)+'" class="chart-axis">Now</text><path d="'+line+' L'+X(end)+' '+Y(0)+' L'+X(now)+' '+Y(0)+' Z" fill="rgba(224,137,106,.10)"/>';
-if(live.length>1)for(const x of live)svg+='<path d="'+path(before,t=>measured(x,t))+'" fill="none" stroke="'+x.color+'" stroke-width="1.5"/><path d="'+path(times,t=>one(x,t))+'"'+dash+' stroke="'+x.color+'" stroke-width="1.5"/>';
-svg+='<path d="'+path(before,past)+'" fill="none" stroke="var(--clay)" stroke-width="2"/><path d="'+line+'"'+dash+' stroke="var(--clay)" stroke-width="2"/><circle cx="'+X(now)+'" cy="'+Y(at(now))+'" r="5" fill="var(--clay)"><title>Measured now: '+Math.round(at(now)*100)+'%</title></circle><g class="hide" pointer-events="none"><line y1="'+top+'" y2="'+(top+plot)+'" stroke="#6b7280"/><circle r="4" fill="var(--clay)"/><text y="'+(top+28)+'" class="chart-axis" style="fill:var(--ink);font-size:12px;paint-order:stroke;stroke:var(--panel);stroke-width:4px"></text></g></svg>';
-$('outlookChart').innerHTML='<div class="legend"><span><i style="background:var(--clay)"></i>Total</span>'+(live.length>1?live.map(x=>'<span><i style="background:'+x.color+'"></i>'+escape(label(x.a.name))+'</span>').join(''):'')+'<span>Solid = stored · dashed = projected estimate</span></div>'+svg;
-outlookPeek=(chart,e)=>{let guide=chart.lastElementChild,[rule,dot,tip]=guide.children,box=chart.getBoundingClientRect(),px=Math.min(width-right,Math.max(left,(e.clientX-box.left)*width/box.width)),t=begin+(px-left)/(width-left-right)*(end-begin),old=t<now,v=old?past(t):at(t);if(v==null)return guide.classList.add('hide');rule.setAttribute('x1',px);rule.setAttribute('x2',px);dot.setAttribute('cx',px);dot.setAttribute('cy',Y(v));tip.setAttribute('x',px+(px>width*.75?-8:8));tip.setAttribute('text-anchor',px>width*.75?'end':'start');tip.textContent=clock(t)+' · '+Math.round(v*100)+'% left'+(live.length>1?' ('+live.map(x=>label(x.a.name)+' '+Math.round((old?measured(x,t):one(x,t))*100)+'%').join(', ')+')':'')+(old?' · stored':Math.abs(t-now)<60000?' · measured':' · estimate');guide.classList.remove('hide')}}
-const paceLabel=x=>{let gap=(1-x.st.left)*100-Math.min(1,Math.max(0,(now-(x.st.reset-WEEK))/WEEK))*100;return gap>5?'ahead of pace':gap<-5?'under pace':'on pace'};
-$('outlookNote').textContent=live.map(x=>label(x.a.name)+' · '+paceLabel(x)+': '+(x.rate==null?'window just started · pace unknown':x.rate>0&&now+x.st.left/x.rate<x.st.reset?'runs out in ~'+span(x.st.left/x.rate)+' at this pace, before its reset '+clock(x.st.reset):'lasts until its reset '+clock(x.st.reset)+' at this pace')).join(' · ')+((on.length>live.length)?' · '+(on.length-live.length)+' enabled account(s) without a current reading are excluded.':'')}
-function renderQuota(){let now=Date.now();let providerError=(quota?.accounts||[]).some(a=>!a.disabled&&a.quota_error);$('quotaProblem').classList.toggle('hide',!quotaError&&!quota?.error&&!providerError);$('quotaProblem').textContent=quotaError?quotaError+(quota?' Showing readings loaded at '+clock(quotaAt)+'.':''):quota?.error?'Backend reported: '+String(quota.error):providerError?'Anthropic quota refresh failed · showing the last successful readings.':'';if(!quota){$('quotaRows').innerHTML='<div class="empty">'+(quotaError?'Account quotas are unavailable right now.':'Loading account quotas…')+'</div>';return}
-let list=Array.isArray(quota.accounts)?quota.accounts.slice():[];list.sort((a,b)=>(!!a.disabled-!!b.disabled)||((b.priority??0)-(a.priority??0)));
-const provider=a=>a.provider||'unknown', providers=[...new Set(list.map(provider))].sort();if(!providers.includes(quotaProvider))quotaProvider='';
-$('quotaTabs').innerHTML=[['','All',list.length],...providers.map(p=>[p,human(p),list.filter(a=>provider(a)===p).length])].map(([id,n,c])=>'<button type="button" data-provider="'+escape(id)+'" aria-pressed="'+(id===quotaProvider)+'">'+escape(n)+'<span class="count">'+c+'</span></button>').join('');
-if(quotaProvider)list=list.filter(a=>provider(a)===quotaProvider);
-let on=list.filter(a=>!a.disabled),weekly=on.map(a=>windowState(a,a.seven_day,now)).filter(s=>s.kind==='live');
-renderOutlook(on,now);
-let fresh=on.filter(a=>['five_hour','seven_day'].every(key=>windowState(a,a[key],now).kind==='live')).length;$('quotaFreshness').classList.toggle('fresh',!quotaError&&!quota.error&&!providerError&&fresh===on.length&&on.length>0);$('quotaFreshness').textContent=quotaError||quota.error||providerError?'Quota refresh unavailable · saved readings may be stale':fresh===on.length&&on.length?'Quota readings fresh · '+fresh+'/'+on.length+' enabled accounts':'Quota readings unverified · '+fresh+'/'+on.length+' enabled accounts fresh. Quota checks run every ten minutes. Readings expire after eleven minutes, after a failed check, or at reset.';
-$('poolCount').textContent=list.length+' account'+(list.length===1?'':'s')+' · '+on.length+' enabled';$('poolCountSub').textContent='· '+fresh+' fresh';
-$('poolWeek').textContent=weekly.length?weekly.reduce((n,s)=>n+s.left,0).toFixed(2):'—';$('poolWeekSub').textContent='Account-weeks left · current readings from '+weekly.length+' of '+on.length+' enabled';
-let next=on.map(a=>({a,st:windowState(a,a.seven_day,now)})).filter(x=>x.st.kind==='live'||x.st.kind==='stale').sort((x,y)=>x.st.reset-y.st.reset)[0];
-$('poolReset').textContent=next&&isFinite(next.st.reset)?span(next.st.reset-now):'—';$('poolResetSub').textContent=next&&isFinite(next.st.reset)?label(next.a.name)+' · '+clock(next.st.reset):'No current 7-day reading';
-$('poolRoute').textContent=human(quota.strategy)||'—';$('poolRouteSub').textContent=[quota.priority_policy&&'Priority: '+human(quota.priority_policy).toLowerCase(),'Session affinity '+(quota.session_affinity?'on'+(quota.session_affinity_ttl?' ('+quota.session_affinity_ttl+')':''):'off')].filter(Boolean).join(' · ');
-$('quotaUpdated').textContent=isFinite(time(quota.generated))?'Generated '+clock(time(quota.generated)):'Generation time unknown';
-$('quotaRows').innerHTML=list.length?list.map(a=>{let seen=time(a.observed_at),status=a.disabled?'<span class="chip warn">Disabled · not routed</span>':a.via==='genius'?'<span class="chip">Used on Genius · not routed by CPA</span>':'<span class="chip">Priority '+escape(a.priority??'—')+'</span>'+(a.status?'<span class="chip">'+escape(human(a.status))+'</span>':'');let out=[windowState(a,a.seven_day,now),windowState(a,a.five_hour,now)].filter(x=>(x.kind==='live'||x.kind==='stale')&&x.left<=0).sort((x,y)=>y.reset-x.reset)[0];return '<article class="acct'+(a.disabled?' is-off':'')+'"><div><div class="acct-name"><strong>'+escape(label(a.name))+'</strong><span class="tag">'+escape(human(a.provider||'unknown'))+'</span>'+(out?'<span class="back">back in '+span(out.reset-now)+'</span>':'')+'</div><div>'+status+'</div><div class="sub">'+(isFinite(seen)?'Last seen '+span(now-seen)+' ago':'Not seen yet')+'</div></div>'+quotaMeter('5-hour window',windowState(a,a.five_hour,now),now)+quotaMeter('Weekly · 7-day',windowState(a,a.seven_day,now),now)+'</article>'}).join(''):'<div class="empty">No accounts configured.</div>'}
-async function loadQuota(){if(quotaPending)return;quotaPending=true;try{let res=await fetch('/api/accounts',{cache:'no-store'});if(!res.ok)throw Error('Account quotas unavailable ('+res.status+').');quota=await res.json();quotaAt=Date.now();quotaError=''}catch(e){quotaError=e instanceof SyntaxError?'Account quotas returned unreadable data.':e.message||'Account quotas unavailable.'}finally{quotaPending=false;renderQuota()}}
-let upstreamPending=false;
-async function loadUpstream(){
-if(upstreamPending)return;upstreamPending=true;
-try{
-const res=await fetch('/api/upstream',{cache:'no-store'});if(!res.ok)throw Error();
-const u=await res.json(),box=$('upstream');
-box.className=(u.status==='outdated'||u.status==='diverged'?'alert':'notice')+' section';
-const title=u.status==='outdated'?'CPA is out of date — we need to update.':u.status==='current'?'CPA matches upstream tip.':u.status==='diverged'?'CPA and upstream have diverged — review needed.':'Unable to check CPA upstream.';
-const detail=u.status==='outdated'?integer(u.commits_behind)+' commits behind upstream. Keep our local safeguards when updating.':u.status==='diverged'?'Review upstream changes and preserve our local safeguards.':u.status==='unknown'?'Retrying in five minutes.':'';
-const link=u.compare_url&&u.compare_url.startsWith('https://github.com/router-for-me/CLIProxyAPI/compare/')?'<a href="'+escape(u.compare_url)+'" target="_blank" rel="noopener">View changes ↗</a>':'';
-box.innerHTML='<div class="update-heading"><strong>'+title+'</strong>'+link+'</div>'+(detail?'<div class="update-detail">'+detail+'</div>':'')+'<div class="update-meta">'+escape(u.version)+' · Checked '+escape(new Date(u.checked_at).toLocaleTimeString('en',{timeZone:TZ}))+ ' · Checks every five minutes with live refresh</div>';
-}catch(e){$('upstream').textContent='Unable to check CPA upstream. Try Refresh.'}finally{upstreamPending=false}}
+function pace(a, st, now) {
+  let seen = time(a.observed_at),
+    first = (a.history || []).find(p => p[0] >= now - DAY);
+  if (first && seen - first[0] >= 3 * 3600000)
+    return {
+      rate: Math.max(0, (1 - st.left - first[1]) / (seen - first[0])),
+      basis: 'over the last ' + span(seen - first[0]),
+    };
+  let elapsed = now - (st.reset - WEEK);
+  return { rate: elapsed >= 3600000 ? (1 - st.left) / elapsed : null, basis: 'since its window began' };
+}
+let quotaProvider = '',
+  quotaView = 'remaining',
+  outlookPeek = null;
+function renderOutlook(on, now) {
+  outlookPeek = null;
+  let read = on.map(a => ({ a, st: windowState(a, a.seven_day, now) })),
+    live = read.filter(x => x.st.kind === 'live'),
+    held = read.filter(x => x.st.recent);
+  // A failed refresh keeps the last measured share visible but must not feed any estimate.
+  if (!live.length && held.length && (quotaError || quota.error)) {
+    $('outlookLeft').textContent = Math.round(held.reduce((n, x) => n + x.st.left, 0) * 100) + '%';
+    $('outlookOf').textContent = '/ ' + held.length * 100 + '% remaining · last measured';
+    $('outlookRate').textContent = '';
+    $('outlookNext').textContent = '';
+    $('outlookChart').innerHTML =
+      '<div class="empty">Forecast paused · the latest quota refresh failed, so no estimate is drawn from older readings.</div>';
+    $('outlookNote').textContent = '';
+    $('outlookKey').textContent = '';
+    return;
+  }
+  if (!live.length) {
+    $('outlookLeft').textContent = '—';
+    $('outlookOf').textContent = 'No current 7-day reading';
+    $('outlookRate').textContent = '';
+    $('outlookNext').textContent = '';
+    $('outlookChart').innerHTML =
+      '<div class="empty">Forecast unavailable · it needs a fresh 7-day reading from at least one enabled account.</div>';
+    $('outlookNote').textContent = '';
+    $('outlookKey').textContent = '';
+    return;
+  }
+  live.forEach((x, i) => Object.assign(x, pace(x.a, x.st, now), { color: COLORS[i % COLORS.length] }));
+  let known = live.filter(x => x.rate != null),
+    capacity = live.length,
+    end = now + Number($('outlookHorizon').value || 7) * 86400000;
+  // After its known reset an account restarts at 100% and drains at the same estimated pace; a 7-day horizon cannot hold a second reset.
+  const one = (x, t) => {
+      let r = x.rate || 0;
+      return t < x.st.reset ? Math.max(0, x.st.left - (t - now) * r) : Math.max(0, 1 - (t - x.st.reset) * r);
+    },
+    at = t => live.reduce((n, x) => n + one(x, t), 0);
+  // Before now each account shows its stored readings: the latest one at or before that moment, or nothing if none is that old.
+  const measured = (x, t) => {
+      let p = (x.a.history || []).filter(p => p[0] <= t).pop();
+      return t >= now ? x.st.left : p ? 1 - p[1] : null;
+    },
+    past = t => {
+      let v = live.map(x => measured(x, t));
+      return v.includes(null) ? null : v.reduce((n, y) => n + y, 0);
+    };
+  $('outlookLeft').textContent = Math.round(at(now) * 100) + '%';
+  $('outlookOf').textContent = '/ ' + capacity * 100 + '% remaining';
+  $('outlookRate').textContent = known.length
+    ? '~' + (known.reduce((n, x) => n + x.rate, 0) * 360000000).toFixed(1) + '% per hour · estimate'
+    : 'Pace unknown';
+  const runsOut = x => (x.rate > 0 && now + x.st.left / x.rate < x.st.reset ? now + x.st.left / x.rate : null);
+  let next = live.slice().sort((x, y) => x.st.reset - y.st.reset)[0],
+    nextOut = runsOut(next);
+  $('outlookNext').textContent =
+    'Next reset: ' +
+    label(next.a.name) +
+    ' · ' +
+    clock(next.st.reset) +
+    ' · ' +
+    (next.rate == null
+      ? 'pace unknown'
+      : nextOut
+        ? 'runs out first, ~' + clock(nextOut)
+        : '~' + Math.round((next.st.left - (next.st.reset - now) * next.rate) * 100) + '% left at reset') +
+    ' · estimate';
+  $('outlookKey').textContent =
+    (quotaView === 'drain'
+      ? 'Pace = share of the week used ÷ time · '
+      : "Solid = stored readings · dashed = estimate at each account's pace · ") +
+    live.map(x => label(x.a.name) + ' pace ' + x.basis).join(' · ');
+  if (quotaView === 'drain') {
+    $('outlookChart').innerHTML = live
+      .map(x => {
+        let start = x.st.reset - WEEK,
+          used = 1 - x.st.left,
+          out = runsOut(x);
+        return (
+          '<div class="share"><span>' +
+          escape(label(x.a.name)) +
+          '</span><strong>' +
+          (x.rate == null
+            ? 'Pace unknown'
+            : '~' + (x.rate * 360000000).toFixed(2) + '% of its week per hour · ' + x.basis) +
+          '</strong><div class="meter" role="img" aria-label="' +
+          Math.round(used * 100) +
+          '% of the week used"><span style="width:' +
+          (used * 100).toFixed(1) +
+          '%;background:var(--clay)"></span></div><div class="sub" style="grid-column:1/-1">Used ' +
+          Math.round(used * 100) +
+          '% in ' +
+          span(now - start) +
+          ' since ' +
+          escape(clock(start)) +
+          ' · ' +
+          (x.rate == null
+            ? 'window began under an hour ago'
+            : out
+              ? 'at this pace runs out ~' + escape(clock(out)) + ', ' + span(x.st.reset - out) + ' before its reset'
+              : 'at this pace ~' +
+                Math.round((x.st.left - (x.st.reset - now) * x.rate) * 100) +
+                '% left at its reset ' +
+                escape(clock(x.st.reset))) +
+          ' · estimate</div></div>'
+        );
+      })
+      .join('');
+  } else {
+    let width = Math.max(320, $('outlookChart').clientWidth || 1200),
+      height = 260,
+      left = 56,
+      right = 16,
+      top = 20,
+      bottom = 34,
+      plot = height - top - bottom,
+      stamps = live.flatMap(x => (x.a.history || []).map(p => p[0])).filter(t => t >= now - DAY && t < now),
+      begin = stamps.some(t => t < now - 3600000) ? Math.min(...stamps) : now,
+      X = t => left + ((t - begin) / (end - begin)) * (width - left - right),
+      Y = v => top + plot * (1 - v / capacity),
+      times = [];
+    for (let i = 0; i <= 160; i++) times.push(now + ((end - now) * i) / 160);
+    for (const x of live) if (x.st.reset < end) times.push(x.st.reset - 1, x.st.reset);
+    times.sort((a, b) => a - b);
+    const path = (ts, f) =>
+        ts
+          .map(t => [t, f(t)])
+          .filter(([, v]) => v != null)
+          .map(([t, v], i) => (i ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Y(v).toFixed(1))
+          .join(' '),
+      before = [...new Set([...stamps, now])].sort((a, b) => a - b);
+    let line = path(times, at),
+      dash = ' fill="none" stroke-dasharray="7 6"';
+    let svg =
+      '<svg viewBox="0 0 ' +
+      width +
+      ' ' +
+      height +
+      '" role="img" aria-label="Stored and projected remaining weekly quota per account and in total until ' +
+      escape(clock(end)) +
+      ', projection is an estimate">';
+    for (let i = 0; i <= 4; i++) {
+      let y = top + (plot * i) / 4;
+      svg +=
+        '<line x1="' +
+        left +
+        '" x2="' +
+        (width - right) +
+        '" y1="' +
+        y +
+        '" y2="' +
+        y +
+        '" stroke="#22262e"/><text x="' +
+        (left - 10) +
+        '" y="' +
+        (y + 4) +
+        '" text-anchor="end" class="chart-axis">' +
+        Math.round(capacity * 100 * (1 - i / 4)) +
+        '%</text>';
+    }
+    for (const x of live)
+      if (x.st.reset < end)
+        svg +=
+          '<line x1="' +
+          X(x.st.reset) +
+          '" x2="' +
+          X(x.st.reset) +
+          '" y1="' +
+          top +
+          '" y2="' +
+          (top + plot) +
+          '" stroke="#3a404a" stroke-dasharray="2 4"/><text x="' +
+          (X(x.st.reset) + (X(x.st.reset) > width * 0.75 ? -6 : 6)) +
+          '" y="' +
+          (top + 12) +
+          '" text-anchor="' +
+          (X(x.st.reset) > width * 0.75 ? 'end' : 'start') +
+          '" class="chart-axis">Reset · ' +
+          escape(label(x.a.name)) +
+          '</text>';
+    for (let i = width < 600 ? 2 : 1; i <= 4; i += width < 600 ? 2 : 1) {
+      let t = begin + ((end - begin) * i) / 4;
+      svg +=
+        '<text x="' +
+        X(t) +
+        '" y="' +
+        (height - 9) +
+        '" text-anchor="' +
+        (i === 4 ? 'end' : 'middle') +
+        '" class="chart-axis">' +
+        escape(clock(t)) +
+        '</text>';
+    }
+    svg +=
+      '<line x1="' +
+      X(now) +
+      '" x2="' +
+      X(now) +
+      '" y1="' +
+      top +
+      '" y2="' +
+      (top + plot) +
+      '" stroke="#6b7280" stroke-dasharray="2 4"/><text x="' +
+      (X(now) + 8) +
+      '" y="' +
+      (top + 12) +
+      '" class="chart-axis">Now</text><path d="' +
+      line +
+      ' L' +
+      X(end) +
+      ' ' +
+      Y(0) +
+      ' L' +
+      X(now) +
+      ' ' +
+      Y(0) +
+      ' Z" fill="rgba(224,137,106,.10)"/>';
+    if (live.length > 1)
+      for (const x of live)
+        svg +=
+          '<path d="' +
+          path(before, t => measured(x, t)) +
+          '" fill="none" stroke="' +
+          x.color +
+          '" stroke-width="1.5"/><path d="' +
+          path(times, t => one(x, t)) +
+          '"' +
+          dash +
+          ' stroke="' +
+          x.color +
+          '" stroke-width="1.5"/>';
+    svg +=
+      '<path d="' +
+      path(before, past) +
+      '" fill="none" stroke="var(--clay)" stroke-width="2"/><path d="' +
+      line +
+      '"' +
+      dash +
+      ' stroke="var(--clay)" stroke-width="2"/><circle cx="' +
+      X(now) +
+      '" cy="' +
+      Y(at(now)) +
+      '" r="5" fill="var(--clay)"><title>Measured now: ' +
+      Math.round(at(now) * 100) +
+      '%</title></circle><g class="hide" pointer-events="none"><line y1="' +
+      top +
+      '" y2="' +
+      (top + plot) +
+      '" stroke="#6b7280"/><circle r="4" fill="var(--clay)"/><text y="' +
+      (top + 28) +
+      '" class="chart-axis" style="fill:var(--ink);font-size:12px;paint-order:stroke;stroke:var(--panel);stroke-width:4px"></text></g></svg>';
+    $('outlookChart').innerHTML =
+      '<div class="legend"><span><i style="background:var(--clay)"></i>Total</span>' +
+      (live.length > 1
+        ? live
+            .map(x => '<span><i style="background:' + x.color + '"></i>' + escape(label(x.a.name)) + '</span>')
+            .join('')
+        : '') +
+      '<span>Solid = stored · dashed = projected estimate</span></div>' +
+      svg;
+    outlookPeek = (chart, e) => {
+      let guide = chart.lastElementChild,
+        [rule, dot, tip] = guide.children,
+        box = chart.getBoundingClientRect(),
+        px = Math.min(width - right, Math.max(left, ((e.clientX - box.left) * width) / box.width)),
+        t = begin + ((px - left) / (width - left - right)) * (end - begin),
+        old = t < now,
+        v = old ? past(t) : at(t);
+      if (v == null) return guide.classList.add('hide');
+      rule.setAttribute('x1', px);
+      rule.setAttribute('x2', px);
+      dot.setAttribute('cx', px);
+      dot.setAttribute('cy', Y(v));
+      tip.setAttribute('x', px + (px > width * 0.75 ? -8 : 8));
+      tip.setAttribute('text-anchor', px > width * 0.75 ? 'end' : 'start');
+      tip.textContent =
+        clock(t) +
+        ' · ' +
+        Math.round(v * 100) +
+        '% left' +
+        (live.length > 1
+          ? ' (' +
+            live
+              .map(x => label(x.a.name) + ' ' + Math.round((old ? measured(x, t) : one(x, t)) * 100) + '%')
+              .join(', ') +
+            ')'
+          : '') +
+        (old ? ' · stored' : Math.abs(t - now) < 60000 ? ' · measured' : ' · estimate');
+      guide.classList.remove('hide');
+    };
+  }
+  const paceLabel = x => {
+    let gap = (1 - x.st.left) * 100 - Math.min(1, Math.max(0, (now - (x.st.reset - WEEK)) / WEEK)) * 100;
+    return gap > 5 ? 'ahead of pace' : gap < -5 ? 'under pace' : 'on pace';
+  };
+  $('outlookNote').textContent =
+    live
+      .map(
+        x =>
+          label(x.a.name) +
+          ' · ' +
+          paceLabel(x) +
+          ': ' +
+          (x.rate == null
+            ? 'window just started · pace unknown'
+            : x.rate > 0 && now + x.st.left / x.rate < x.st.reset
+              ? 'runs out in ~' + span(x.st.left / x.rate) + ' at this pace, before its reset ' + clock(x.st.reset)
+              : 'lasts until its reset ' + clock(x.st.reset) + ' at this pace'),
+      )
+      .join(' · ') +
+    (on.length > live.length
+      ? ' · ' + (on.length - live.length) + ' enabled account(s) without a current reading are excluded.'
+      : '');
+}
+function renderQuota() {
+  let now = Date.now();
+  let providerError = (quota?.accounts || []).some(a => !a.disabled && a.quota_error);
+  $('quotaProblem').classList.toggle('hide', !quotaError && !quota?.error && !providerError);
+  $('quotaProblem').textContent = quotaError
+    ? quotaError + (quota ? ' Showing readings loaded at ' + clock(quotaAt) + '.' : '')
+    : quota?.error
+      ? 'Backend reported: ' + String(quota.error)
+      : providerError
+        ? 'Anthropic quota refresh failed · showing the last successful readings.'
+        : '';
+  if (!quota) {
+    $('quotaRows').innerHTML =
+      '<div class="empty">' +
+      (quotaError ? 'Account quotas are unavailable right now.' : 'Loading account quotas…') +
+      '</div>';
+    return;
+  }
+  let list = Array.isArray(quota.accounts) ? quota.accounts.slice() : [];
+  list.sort((a, b) => !!a.disabled - !!b.disabled || (b.priority ?? 0) - (a.priority ?? 0));
+  const provider = a => a.provider || 'unknown',
+    providers = [...new Set(list.map(provider))].sort();
+  if (!providers.includes(quotaProvider)) quotaProvider = '';
+  $('quotaTabs').innerHTML = [
+    ['', 'All', list.length],
+    ...providers.map(p => [p, human(p), list.filter(a => provider(a) === p).length]),
+  ]
+    .map(
+      ([id, n, c]) =>
+        '<button type="button" data-provider="' +
+        escape(id) +
+        '" aria-pressed="' +
+        (id === quotaProvider) +
+        '">' +
+        escape(n) +
+        '<span class="count">' +
+        c +
+        '</span></button>',
+    )
+    .join('');
+  if (quotaProvider) list = list.filter(a => provider(a) === quotaProvider);
+  let on = list.filter(a => !a.disabled),
+    weekly = on.map(a => windowState(a, a.seven_day, now)).filter(s => s.kind === 'live');
+  renderOutlook(on, now);
+  let fresh = on.filter(a =>
+    ['five_hour', 'seven_day'].every(key => windowState(a, a[key], now).kind === 'live'),
+  ).length;
+  $('quotaFreshness').classList.toggle(
+    'fresh',
+    !quotaError && !quota.error && !providerError && fresh === on.length && on.length > 0,
+  );
+  $('quotaFreshness').textContent =
+    quotaError || quota.error || providerError
+      ? 'Quota refresh unavailable · saved readings may be stale'
+      : fresh === on.length && on.length
+        ? 'Quota readings fresh · ' + fresh + '/' + on.length + ' enabled accounts'
+        : 'Quota readings unverified · ' +
+          fresh +
+          '/' +
+          on.length +
+          ' enabled accounts fresh. Quota checks run every ten minutes. Readings expire after eleven minutes, after a failed check, or at reset.';
+  $('poolCount').textContent =
+    list.length + ' account' + (list.length === 1 ? '' : 's') + ' · ' + on.length + ' enabled';
+  $('poolCountSub').textContent = '· ' + fresh + ' fresh';
+  $('poolWeek').textContent = weekly.length ? weekly.reduce((n, s) => n + s.left, 0).toFixed(2) : '—';
+  $('poolWeekSub').textContent =
+    'Account-weeks left · current readings from ' + weekly.length + ' of ' + on.length + ' enabled';
+  let next = on
+    .map(a => ({ a, st: windowState(a, a.seven_day, now) }))
+    .filter(x => x.st.kind === 'live' || x.st.kind === 'stale')
+    .sort((x, y) => x.st.reset - y.st.reset)[0];
+  $('poolReset').textContent = next && isFinite(next.st.reset) ? span(next.st.reset - now) : '—';
+  $('poolResetSub').textContent =
+    next && isFinite(next.st.reset) ? label(next.a.name) + ' · ' + clock(next.st.reset) : 'No current 7-day reading';
+  $('poolRoute').textContent = human(quota.strategy) || '—';
+  $('poolRouteSub').textContent = [
+    quota.priority_policy && 'Priority: ' + human(quota.priority_policy).toLowerCase(),
+    'Session affinity ' +
+      (quota.session_affinity
+        ? 'on' + (quota.session_affinity_ttl ? ' (' + quota.session_affinity_ttl + ')' : '')
+        : 'off'),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  $('quotaUpdated').textContent = isFinite(time(quota.generated))
+    ? 'Generated ' + clock(time(quota.generated))
+    : 'Generation time unknown';
+  $('quotaRows').innerHTML = list.length
+    ? list
+        .map(a => {
+          let seen = time(a.observed_at),
+            status = a.disabled
+              ? '<span class="chip warn">Disabled · not routed</span>'
+              : a.via === 'genius'
+                ? '<span class="chip">Used on Genius · not routed by CPA</span>'
+                : '<span class="chip">Priority ' +
+                  escape(a.priority ?? '—') +
+                  '</span>' +
+                  (a.status ? '<span class="chip">' + escape(human(a.status)) + '</span>' : '');
+          let out = [windowState(a, a.seven_day, now), windowState(a, a.five_hour, now)]
+            .filter(x => (x.kind === 'live' || x.kind === 'stale') && x.left <= 0)
+            .sort((x, y) => y.reset - x.reset)[0];
+          return (
+            '<article class="acct' +
+            (a.disabled ? ' is-off' : '') +
+            '"><div><div class="acct-name"><strong>' +
+            escape(label(a.name)) +
+            '</strong><span class="tag">' +
+            escape(human(a.provider || 'unknown')) +
+            '</span>' +
+            (out ? '<span class="back">back in ' + span(out.reset - now) + '</span>' : '') +
+            '</div><div>' +
+            status +
+            '</div><div class="sub">' +
+            (isFinite(seen) ? 'Last seen ' + span(now - seen) + ' ago' : 'Not seen yet') +
+            '</div></div>' +
+            quotaMeter('5-hour window', windowState(a, a.five_hour, now), now) +
+            quotaMeter('Weekly · 7-day', windowState(a, a.seven_day, now), now) +
+            '</article>'
+          );
+        })
+        .join('')
+    : '<div class="empty">No accounts configured.</div>';
+}
+async function loadQuota() {
+  if (quotaPending) return;
+  quotaPending = true;
+  try {
+    let res = await fetch('/api/accounts', { cache: 'no-store' });
+    if (!res.ok) throw Error('Account quotas unavailable (' + res.status + ').');
+    quota = await res.json();
+    quotaAt = Date.now();
+    quotaError = '';
+  } catch (e) {
+    quotaError =
+      e instanceof SyntaxError
+        ? 'Account quotas returned unreadable data.'
+        : e.message || 'Account quotas unavailable.';
+  } finally {
+    quotaPending = false;
+    renderQuota();
+  }
+}
+let upstreamPending = false;
+async function loadUpstream() {
+  if (upstreamPending) return;
+  upstreamPending = true;
+  try {
+    const res = await fetch('/api/upstream', { cache: 'no-store' });
+    if (!res.ok) throw Error();
+    const u = await res.json(),
+      box = $('upstream');
+    box.className = (u.status === 'outdated' || u.status === 'diverged' ? 'alert' : 'notice') + ' section';
+    const title =
+      u.status === 'outdated'
+        ? 'CPA is out of date — we need to update.'
+        : u.status === 'current'
+          ? 'CPA matches upstream tip.'
+          : u.status === 'diverged'
+            ? 'CPA and upstream have diverged — review needed.'
+            : 'Unable to check CPA upstream.';
+    const detail =
+      u.status === 'outdated'
+        ? integer(u.commits_behind) + ' commits behind upstream. Keep our local safeguards when updating.'
+        : u.status === 'diverged'
+          ? 'Review upstream changes and preserve our local safeguards.'
+          : u.status === 'unknown'
+            ? 'Retrying in five minutes.'
+            : '';
+    const link =
+      u.compare_url && u.compare_url.startsWith('https://github.com/router-for-me/CLIProxyAPI/compare/')
+        ? '<a href="' + escape(u.compare_url) + '" target="_blank" rel="noopener">View changes ↗</a>'
+        : '';
+    box.innerHTML =
+      '<div class="update-heading"><strong>' +
+      title +
+      '</strong>' +
+      link +
+      '</div>' +
+      (detail ? '<div class="update-detail">' + detail + '</div>' : '') +
+      '<div class="update-meta">' +
+      escape(u.version) +
+      ' · Checked ' +
+      escape(new Date(u.checked_at).toLocaleTimeString('en', { timeZone: TZ })) +
+      ' · Checks every five minutes with live refresh</div>';
+  } catch (e) {
+    $('upstream').textContent = 'Unable to check CPA upstream. Try Refresh.';
+  } finally {
+    upstreamPending = false;
+  }
+}
 
-let ccData=null, ccPending=false, ccPage=0;
-const CC_DEFAULTS={ccDays:'7',ccMachine:'',ccApp:'',ccModel:''}, CC_COUNTERS=['inputTokens','cacheReadTokens','cacheCreationTokens','outputTokens','totalTokens'];
-const ccName=id=>id==='aleks-mbp'?'AleksMBP':'Genius';
-function renderCc(){
-if(!ccData)return;
-const selected=$('ccModel').value, models=[...new Set(ccData.rows.map(r=>r.model).filter(Boolean))].sort();
-$('ccModel').innerHTML='<option value="">All models</option>'+[...new Set([...models,...(selected?[selected]:[])])].map(m=>'<option value="'+escape(m)+'">'+escape(m)+'</option>').join('');$('ccModel').value=selected;
-const today=new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()), start=new Date(today+'T00:00:00Z');start.setUTCDate(start.getUTCDate()-Number($('ccDays').value)+1);
-const first=start.toISOString().slice(0,10), machine=$('ccMachine').value, app=$('ccApp').value;
-const states=ccData.machines.filter(m=>!machine||m.machineId===machine), rows=ccData.rows.filter(r=>r.date>=first&&r.date<=today&&(!machine||r.machineId===machine)&&(!app||r.app===app)&&(!selected||r.model===selected)).sort((a,b)=>b.date.localeCompare(a.date)||a.machineId.localeCompare(b.machineId)||a.app.localeCompare(b.app)||String(a.model).localeCompare(String(b.model)));
-const captions={pending:'Pending · no snapshot received',error:'Refresh failed · saved readings',stale:'Stale · saved readings',fresh:'Fresh'};
-$('ccStatus').innerHTML=states.map(m=>'<div class="sub"><strong>'+ccName(m.machineId)+'</strong> · '+(m.state==='error'&&!m.dataUpdatedAt?'Refresh failed · no valid snapshot':captions[m.state])+(m.dataUpdatedAt?' · Last data '+escape(new Date(m.dataUpdatedAt).toLocaleString('en',{timeZone:TZ})):'' )+(m.transport?.lastSuccessAt?' · Last sync '+escape(new Date(m.transport.lastSuccessAt).toLocaleTimeString('en',{timeZone:TZ})):'' )+'</div>').join('');
-const available=states.some(m=>m.dataUpdatedAt), total={};for(const key of CC_COUNTERS)total[key]=rows.reduce((n,r)=>n+r[key],0);
-for(const [id,key] of [['ccTotal','totalTokens'],['ccInput','inputTokens'],['ccOutput','outputTokens']])$(id).textContent=available?fmt(total[key]):'—';$('ccCache').textContent=available?fmt(total.cacheReadTokens+total.cacheCreationTokens):'—';
-$('ccTotalExact').textContent=available?integer(total.totalTokens)+' tokens':'No snapshot yet · not counted as zero';
-const share=n=>total.totalTokens?n/total.totalTokens:0, parts=[['Input','inputTokens','var(--blue)'],['Cache read','cacheReadTokens','var(--aqua)'],['Cache write','cacheCreationTokens','var(--amber)'],['Output','outputTokens','var(--green)']];
-$('ccMix').innerHTML=available&&total.totalTokens?'<div class="mix" role="img" aria-label="Token mix: '+parts.map(([n,k])=>n+' '+pct(share(total[k]))).join(', ')+'">'+parts.map(([,k,c])=>'<span style="width:'+(share(total[k])*100).toFixed(2)+'%;background:'+c+'"></span>').join('')+'</div><div class="legend wrap" aria-hidden="true">'+parts.map(([n,k,c])=>'<span><i style="background:'+c+'"></i>'+n+' '+pct(share(total[k]))+'</span>').join('')+'</div>':'';
-const days=[];for(const d=new Date(start);d.toISOString().slice(0,10)<=today;d.setUTCDate(d.getUTCDate()+1))days.push({date:d.toISOString().slice(0,10),claude:0,codex:0});
-const byDate=new Map(days.map(d=>[d.date,d])), byModel=new Map();for(const r of rows){byDate.get(r.date)[r.app==='claude'?'claude':'codex']+=r.totalTokens;const m=byModel.get(r.model||'Unknown model')||{n:0,app:r.app};m.n+=r.totalTokens;byModel.set(r.model||'Unknown model',m)}
-const appTotals=[['Claude Code','claude','var(--aqua)'],['Codex','codex','var(--blue)']].map(([n,k,c])=>[n,c,days.reduce((m,d)=>m+d[k],0)]);
-$('ccApps').innerHTML=available?appTotals.map(([n,c,v])=>'<div class="app-total"><span class="sub"><i style="background:'+c+'"></i>'+n+'</span><strong>'+fmt(v)+'</strong><span class="sub">'+pct(share(v))+' of tokens</span></div>').join(''):'';
-const waiting='<div class="empty">Waiting for a real snapshot.</div>', ranked=[...byModel].sort((a,b)=>b[1].n-a[1].n);
-$('ccChart').innerHTML=available?bars(days,[['Claude Code',d=>d.claude,'#74dbc4'],['Codex',d=>d.codex,'#7ca4d6']],'Daily recorded tokens by app over '+days.length+' days'):waiting;
-$('ccModelCount').textContent=ranked.length+' model'+(ranked.length===1?'':'s');
-$('ccModels').innerHTML=!available?waiting:ranked.length?ranked.slice(0,6).map(([m,x])=>'<div class="share"><span title="'+escape(m)+'">'+escape(m)+'</span><strong>'+fmt(x.n)+' · '+pct(share(x.n))+'</strong><div class="meter" aria-hidden="true"><span style="width:'+(share(x.n)*100).toFixed(2)+'%;background:'+(x.app==='claude'?'var(--aqua)':'var(--blue)')+'"></span></div></div>').join('')+(ranked.length>6?'<p class="sub">+'+(ranked.length-6)+' more in the daily detail</p>':''):'<div class="empty">No ccusage records match these filters.</div>';
-const active=Object.keys(CC_DEFAULTS).filter(id=>$(id).value!==CC_DEFAULTS[id]).length;$('ccReset').disabled=!active;$('ccFilterNote').textContent=active?active+' filter'+(active===1?'':'s')+' active':'';
-$('ccUpdated').textContent='Viewed '+new Date(ccData.generatedAt).toLocaleTimeString('en',{timeZone:TZ});
-const issues=states.filter(m=>m.state!=='fresh').map(m=>ccName(m.machineId)+' '+m.state);
-$('ccCoverage').textContent=rows.length+' day/model aggregates in selection'+(issues.length?' · Partial or saved coverage: '+issues.join(', '):' · Available ccusage records')+'. '+[...new Set(states.flatMap(m=>m.coverage?.limitations||[]))].join(' ');
-ccPage=Math.min(ccPage,Math.max(0,Math.ceil(rows.length/PAGE_SIZE)-1));const page=rows.slice(ccPage*PAGE_SIZE,(ccPage+1)*PAGE_SIZE);
-$('ccRows').innerHTML=page.length?page.map(r=>'<tr><td>'+escape(r.date)+(r.reportedInLatest?'':' · saved')+'</td><td>'+ccName(r.machineId)+'</td><td>'+(r.app==='claude'?'Claude Code':'Codex')+'</td><td>'+escape(r.model||'Unknown model')+'</td>'+CC_COUNTERS.map(k=>'<td class="num">'+integer(r[k])+'</td>').join('')+'</tr>').join(''):'<tr><td colspan="9" class="empty">'+(available?'No ccusage records match these filters.':'Waiting for a real snapshot from this machine.')+'</td></tr>';
-$('ccPrevious').disabled=ccPage===0;$('ccNext').disabled=(ccPage+1)*PAGE_SIZE>=rows.length;$('ccPage').textContent=rows.length?'Page '+(ccPage+1)+' of '+Math.ceil(rows.length/PAGE_SIZE):'No rows';
+let ccData = null,
+  ccPending = false,
+  ccPage = 0;
+const CC_DEFAULTS = { ccDays: '7', ccMachine: '', ccApp: '', ccModel: '' },
+  CC_COUNTERS = ['inputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'outputTokens', 'totalTokens'];
+const ccName = id => (id === 'aleks-mbp' ? 'AleksMBP' : 'Genius');
+function renderCc() {
+  if (!ccData) return;
+  const selected = $('ccModel').value,
+    models = [...new Set(ccData.rows.map(r => r.model).filter(Boolean))].sort();
+  $('ccModel').innerHTML =
+    '<option value="">All models</option>' +
+    [...new Set([...models, ...(selected ? [selected] : [])])]
+      .map(m => '<option value="' + escape(m) + '">' + escape(m) + '</option>')
+      .join('');
+  $('ccModel').value = selected;
+  const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: TZ,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date()),
+    start = new Date(today + 'T00:00:00Z');
+  start.setUTCDate(start.getUTCDate() - Number($('ccDays').value) + 1);
+  const first = start.toISOString().slice(0, 10),
+    machine = $('ccMachine').value,
+    app = $('ccApp').value;
+  const states = ccData.machines.filter(m => !machine || m.machineId === machine),
+    rows = ccData.rows
+      .filter(
+        r =>
+          r.date >= first &&
+          r.date <= today &&
+          (!machine || r.machineId === machine) &&
+          (!app || r.app === app) &&
+          (!selected || r.model === selected),
+      )
+      .sort(
+        (a, b) =>
+          b.date.localeCompare(a.date) ||
+          a.machineId.localeCompare(b.machineId) ||
+          a.app.localeCompare(b.app) ||
+          String(a.model).localeCompare(String(b.model)),
+      );
+  const captions = {
+    pending: 'Pending · no snapshot received',
+    error: 'Refresh failed · saved readings',
+    stale: 'Stale · saved readings',
+    fresh: 'Fresh',
+  };
+  $('ccStatus').innerHTML = states
+    .map(
+      m =>
+        '<div class="sub"><strong>' +
+        ccName(m.machineId) +
+        '</strong> · ' +
+        (m.state === 'error' && !m.dataUpdatedAt ? 'Refresh failed · no valid snapshot' : captions[m.state]) +
+        (m.dataUpdatedAt
+          ? ' · Last data ' + escape(new Date(m.dataUpdatedAt).toLocaleString('en', { timeZone: TZ }))
+          : '') +
+        (m.transport?.lastSuccessAt
+          ? ' · Last sync ' + escape(new Date(m.transport.lastSuccessAt).toLocaleTimeString('en', { timeZone: TZ }))
+          : '') +
+        '</div>',
+    )
+    .join('');
+  const available = states.some(m => m.dataUpdatedAt),
+    total = {};
+  for (const key of CC_COUNTERS) total[key] = rows.reduce((n, r) => n + r[key], 0);
+  for (const [id, key] of [
+    ['ccTotal', 'totalTokens'],
+    ['ccInput', 'inputTokens'],
+    ['ccOutput', 'outputTokens'],
+  ])
+    $(id).textContent = available ? fmt(total[key]) : '—';
+  $('ccCache').textContent = available ? fmt(total.cacheReadTokens + total.cacheCreationTokens) : '—';
+  $('ccTotalExact').textContent = available
+    ? integer(total.totalTokens) + ' tokens'
+    : 'No snapshot yet · not counted as zero';
+  const share = n => (total.totalTokens ? n / total.totalTokens : 0),
+    parts = [
+      ['Input', 'inputTokens', 'var(--blue)'],
+      ['Cache read', 'cacheReadTokens', 'var(--aqua)'],
+      ['Cache write', 'cacheCreationTokens', 'var(--amber)'],
+      ['Output', 'outputTokens', 'var(--green)'],
+    ];
+  $('ccMix').innerHTML =
+    available && total.totalTokens
+      ? '<div class="mix" role="img" aria-label="Token mix: ' +
+        parts.map(([n, k]) => n + ' ' + pct(share(total[k]))).join(', ') +
+        '">' +
+        parts
+          .map(
+            ([, k, c]) =>
+              '<span style="width:' + (share(total[k]) * 100).toFixed(2) + '%;background:' + c + '"></span>',
+          )
+          .join('') +
+        '</div><div class="legend wrap" aria-hidden="true">' +
+        parts
+          .map(([n, k, c]) => '<span><i style="background:' + c + '"></i>' + n + ' ' + pct(share(total[k])) + '</span>')
+          .join('') +
+        '</div>'
+      : '';
+  const days = [];
+  for (const d = new Date(start); d.toISOString().slice(0, 10) <= today; d.setUTCDate(d.getUTCDate() + 1))
+    days.push({ date: d.toISOString().slice(0, 10), claude: 0, codex: 0 });
+  const byDate = new Map(days.map(d => [d.date, d])),
+    byModel = new Map();
+  for (const r of rows) {
+    byDate.get(r.date)[r.app === 'claude' ? 'claude' : 'codex'] += r.totalTokens;
+    const m = byModel.get(r.model || 'Unknown model') || { n: 0, app: r.app };
+    m.n += r.totalTokens;
+    byModel.set(r.model || 'Unknown model', m);
+  }
+  const appTotals = [
+    ['Claude Code', 'claude', 'var(--aqua)'],
+    ['Codex', 'codex', 'var(--blue)'],
+  ].map(([n, k, c]) => [n, c, days.reduce((m, d) => m + d[k], 0)]);
+  $('ccApps').innerHTML = available
+    ? appTotals
+        .map(
+          ([n, c, v]) =>
+            '<div class="app-total"><span class="sub"><i style="background:' +
+            c +
+            '"></i>' +
+            n +
+            '</span><strong>' +
+            fmt(v) +
+            '</strong><span class="sub">' +
+            pct(share(v)) +
+            ' of tokens</span></div>',
+        )
+        .join('')
+    : '';
+  const waiting = '<div class="empty">Waiting for a real snapshot.</div>',
+    ranked = [...byModel].sort((a, b) => b[1].n - a[1].n);
+  $('ccChart').innerHTML = available
+    ? bars(
+        days,
+        [
+          ['Claude Code', d => d.claude, '#74dbc4'],
+          ['Codex', d => d.codex, '#7ca4d6'],
+        ],
+        'Daily recorded tokens by app over ' + days.length + ' days',
+      )
+    : waiting;
+  $('ccModelCount').textContent = ranked.length + ' model' + (ranked.length === 1 ? '' : 's');
+  $('ccModels').innerHTML = !available
+    ? waiting
+    : ranked.length
+      ? ranked
+          .slice(0, 6)
+          .map(
+            ([m, x]) =>
+              '<div class="share"><span title="' +
+              escape(m) +
+              '">' +
+              escape(m) +
+              '</span><strong>' +
+              fmt(x.n) +
+              ' · ' +
+              pct(share(x.n)) +
+              '</strong><div class="meter" aria-hidden="true"><span style="width:' +
+              (share(x.n) * 100).toFixed(2) +
+              '%;background:' +
+              (x.app === 'claude' ? 'var(--aqua)' : 'var(--blue)') +
+              '"></span></div></div>',
+          )
+          .join('') +
+        (ranked.length > 6 ? '<p class="sub">+' + (ranked.length - 6) + ' more in the daily detail</p>' : '')
+      : '<div class="empty">No ccusage records match these filters.</div>';
+  const active = Object.keys(CC_DEFAULTS).filter(id => $(id).value !== CC_DEFAULTS[id]).length;
+  $('ccReset').disabled = !active;
+  $('ccFilterNote').textContent = active ? active + ' filter' + (active === 1 ? '' : 's') + ' active' : '';
+  $('ccUpdated').textContent = 'Viewed ' + new Date(ccData.generatedAt).toLocaleTimeString('en', { timeZone: TZ });
+  const issues = states.filter(m => m.state !== 'fresh').map(m => ccName(m.machineId) + ' ' + m.state);
+  $('ccCoverage').textContent =
+    rows.length +
+    ' day/model aggregates in selection' +
+    (issues.length ? ' · Partial or saved coverage: ' + issues.join(', ') : ' · Available ccusage records') +
+    '. ' +
+    [...new Set(states.flatMap(m => m.coverage?.limitations || []))].join(' ');
+  ccPage = Math.min(ccPage, Math.max(0, Math.ceil(rows.length / PAGE_SIZE) - 1));
+  const page = rows.slice(ccPage * PAGE_SIZE, (ccPage + 1) * PAGE_SIZE);
+  $('ccRows').innerHTML = page.length
+    ? page
+        .map(
+          r =>
+            '<tr><td>' +
+            escape(r.date) +
+            (r.reportedInLatest ? '' : ' · saved') +
+            '</td><td>' +
+            ccName(r.machineId) +
+            '</td><td>' +
+            (r.app === 'claude' ? 'Claude Code' : 'Codex') +
+            '</td><td>' +
+            escape(r.model || 'Unknown model') +
+            '</td>' +
+            CC_COUNTERS.map(k => '<td class="num">' + integer(r[k]) + '</td>').join('') +
+            '</tr>',
+        )
+        .join('')
+    : '<tr><td colspan="9" class="empty">' +
+      (available ? 'No ccusage records match these filters.' : 'Waiting for a real snapshot from this machine.') +
+      '</td></tr>';
+  $('ccPrevious').disabled = ccPage === 0;
+  $('ccNext').disabled = (ccPage + 1) * PAGE_SIZE >= rows.length;
+  $('ccPage').textContent = rows.length
+    ? 'Page ' + (ccPage + 1) + ' of ' + Math.ceil(rows.length / PAGE_SIZE)
+    : 'No rows';
 }
-function renderSplit(){
-const cpa=ccData.cpaFromGenius, ready=['aleks-mbp','genius'].every(id=>ccData.machines.find(m=>m.machineId===id)?.dataUpdatedAt), day=t=>new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(t);
-if(!cpa?.since||!ready){for(const id of ['splitPersonal','splitWork','splitShare','splitSince'])$(id).textContent='—';$('splitPersonalDetail').textContent=$('splitWorkDetail').textContent=$('splitNote').textContent=$('splitMix').innerHTML='';$('splitChart').innerHTML='<div class="empty">'+(!cpa?'Genius\'s tailnet address could not be resolved, so CPA traffic cannot be attributed.':!cpa.since?'Waiting for the first CPA request recorded with its source.':'Waiting for snapshots from both machines.')+'</div>';return}
-const today=day(new Date()), start=new Date(today+'T00:00:00Z');start.setUTCDate(start.getUTCDate()-29);const first=[day(new Date(cpa.since)),start.toISOString().slice(0,10)].sort()[1], rows=[], claude=(id,date)=>ccData.rows.filter(r=>r.machineId===id&&r.app==='claude'&&r.date===date).reduce((n,r)=>n+r.totalTokens,0);
-for(const d=new Date(first+'T00:00:00Z');d.toISOString().slice(0,10)<=today;d.setUTCDate(d.getUTCDate()+1)){const date=d.toISOString().slice(0,10), genius=claude('genius',date), viaCpa=cpa.days[date]||0;rows.push({date,mac:claude('aleks-mbp',date),genius,viaCpa,work:Math.max(0,genius-viaCpa),over:viaCpa>genius})}
-const sum=k=>rows.reduce((n,r)=>n+r[k],0), mac=sum('mac'), viaCpa=sum('viaCpa'), genius=sum('genius'), work=sum('work'), personal=mac+viaCpa, all=personal+work, over=rows.filter(r=>r.over).length;
-$('splitPersonal').textContent=fmt(personal);$('splitPersonalDetail').textContent='AleksMBP '+fmt(mac)+' + Genius via CPA '+fmt(viaCpa);$('splitWork').textContent='≈ '+fmt(work);$('splitWorkDetail').textContent='Genius '+fmt(genius)+' − via CPA '+fmt(viaCpa);$('splitShare').textContent=all?'≈ '+pct(work/all):'—';
-$('splitSince').textContent=new Date(cpa.since).toLocaleString('en',{timeZone:TZ,month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
-$('splitMix').innerHTML=all?'<div class="mix" role="img" aria-label="Personal '+pct(personal/all)+', Work estimated '+pct(work/all)+'"><span style="width:'+(mac/all*100).toFixed(2)+'%;background:var(--aqua)"></span><span style="width:'+(viaCpa/all*100).toFixed(2)+'%;background:#3f9a87"></span><span style="width:'+(work/all*100).toFixed(2)+'%;background:var(--amber)"></span></div>':'';
-$('splitChart').innerHTML=bars(rows,[['Personal · AleksMBP',r=>r.mac,'#74dbc4'],['Personal · Genius via CPA',r=>r.viaCpa,'#3f9a87'],['Work · estimated',r=>r.work,'#e3b25f']],'Daily Claude Code tokens split into measured Personal and estimated Work');
-$('splitNote').textContent=rows.length+' day'+(rows.length===1?'':'s')+' with a source-tracked split · first day partial'+(over?' · '+over+' day'+(over===1?'':'s')+' where CPA counted more than Genius\'s ccusage, Work shown as zero':'')+'.';
+function renderSplit() {
+  const cpa = ccData.cpaFromGenius,
+    ready = ['aleks-mbp', 'genius'].every(id => ccData.machines.find(m => m.machineId === id)?.dataUpdatedAt),
+    day = t =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(t);
+  if (!cpa?.since || !ready) {
+    for (const id of ['splitPersonal', 'splitWork', 'splitShare', 'splitSince']) $(id).textContent = '—';
+    $('splitPersonalDetail').textContent =
+      $('splitWorkDetail').textContent =
+      $('splitNote').textContent =
+      $('splitMix').innerHTML =
+        '';
+    $('splitChart').innerHTML =
+      '<div class="empty">' +
+      (!cpa
+        ? "Genius's tailnet address could not be resolved, so CPA traffic cannot be attributed."
+        : !cpa.since
+          ? 'Waiting for the first CPA request recorded with its source.'
+          : 'Waiting for snapshots from both machines.') +
+      '</div>';
+    return;
+  }
+  const today = day(new Date()),
+    start = new Date(today + 'T00:00:00Z');
+  start.setUTCDate(start.getUTCDate() - 29);
+  const first = [day(new Date(cpa.since)), start.toISOString().slice(0, 10)].sort()[1],
+    rows = [],
+    claude = (id, date) =>
+      ccData.rows
+        .filter(r => r.machineId === id && r.app === 'claude' && r.date === date)
+        .reduce((n, r) => n + r.totalTokens, 0);
+  for (
+    const d = new Date(first + 'T00:00:00Z');
+    d.toISOString().slice(0, 10) <= today;
+    d.setUTCDate(d.getUTCDate() + 1)
+  ) {
+    const date = d.toISOString().slice(0, 10),
+      genius = claude('genius', date),
+      viaCpa = cpa.days[date] || 0;
+    rows.push({
+      date,
+      mac: claude('aleks-mbp', date),
+      genius,
+      viaCpa,
+      work: Math.max(0, genius - viaCpa),
+      over: viaCpa > genius,
+    });
+  }
+  const sum = k => rows.reduce((n, r) => n + r[k], 0),
+    mac = sum('mac'),
+    viaCpa = sum('viaCpa'),
+    genius = sum('genius'),
+    work = sum('work'),
+    personal = mac + viaCpa,
+    all = personal + work,
+    over = rows.filter(r => r.over).length;
+  $('splitPersonal').textContent = fmt(personal);
+  $('splitPersonalDetail').textContent = 'AleksMBP ' + fmt(mac) + ' + Genius via CPA ' + fmt(viaCpa);
+  $('splitWork').textContent = '≈ ' + fmt(work);
+  $('splitWorkDetail').textContent = 'Genius ' + fmt(genius) + ' − via CPA ' + fmt(viaCpa);
+  $('splitShare').textContent = all ? '≈ ' + pct(work / all) : '—';
+  $('splitSince').textContent = new Date(cpa.since).toLocaleString('en', {
+    timeZone: TZ,
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  $('splitMix').innerHTML = all
+    ? '<div class="mix" role="img" aria-label="Personal ' +
+      pct(personal / all) +
+      ', Work estimated ' +
+      pct(work / all) +
+      '"><span style="width:' +
+      ((mac / all) * 100).toFixed(2) +
+      '%;background:var(--aqua)"></span><span style="width:' +
+      ((viaCpa / all) * 100).toFixed(2) +
+      '%;background:#3f9a87"></span><span style="width:' +
+      ((work / all) * 100).toFixed(2) +
+      '%;background:var(--amber)"></span></div>'
+    : '';
+  $('splitChart').innerHTML = bars(
+    rows,
+    [
+      ['Personal · AleksMBP', r => r.mac, '#74dbc4'],
+      ['Personal · Genius via CPA', r => r.viaCpa, '#3f9a87'],
+      ['Work · estimated', r => r.work, '#e3b25f'],
+    ],
+    'Daily Claude Code tokens split into measured Personal and estimated Work',
+  );
+  $('splitNote').textContent =
+    rows.length +
+    ' day' +
+    (rows.length === 1 ? '' : 's') +
+    ' with a source-tracked split · first day partial' +
+    (over
+      ? ' · ' +
+        over +
+        ' day' +
+        (over === 1 ? '' : 's') +
+        " where CPA counted more than Genius's ccusage, Work shown as zero"
+      : '') +
+    '.';
 }
-async function loadCc(){if(ccPending)return;ccPending=true;try{const res=await fetch('/api/ccusage',{cache:'no-store'});if(!res.ok)throw Error('ccusage snapshots unavailable ('+res.status+').');ccData=await res.json();renderCc();renderSplit();$('ccProblem').classList.add('hide')}catch(e){$('ccProblem').textContent='Snapshot refresh failed · showing last loaded data.';$('ccProblem').classList.remove('hide')}finally{ccPending=false}}
-['ccDays','ccMachine','ccApp','ccModel'].forEach(id=>$(id).addEventListener('change',()=>{ccPage=0;renderCc()}));
-$('ccPrevious').addEventListener('click',()=>{ccPage--;renderCc()});
-$('quotaTabs').addEventListener('click',e=>{let b=e.target.closest('button');if(!b)return;quotaProvider=b.dataset.provider;renderQuota();$('quotaTabs').querySelector('[aria-pressed=true]').focus()});
-$('outlookChart').addEventListener('pointermove',e=>{let chart=e.target.closest('svg');if(chart&&outlookPeek)outlookPeek(chart,e)});
-$('outlookChart').addEventListener('pointerleave',()=>$('outlookChart').querySelector('svg > g')?.classList.add('hide'));
-$('outlookViews').addEventListener('click',e=>{let b=e.target.closest('button');if(!b)return;quotaView=b.dataset.view;for(const x of $('outlookViews').children)x.setAttribute('aria-pressed',String(x===b));renderQuota()});
-$('outlookHorizon').addEventListener('change',renderQuota);
+async function loadCc() {
+  if (ccPending) return;
+  ccPending = true;
+  try {
+    const res = await fetch('/api/ccusage', { cache: 'no-store' });
+    if (!res.ok) throw Error('ccusage snapshots unavailable (' + res.status + ').');
+    ccData = await res.json();
+    renderCc();
+    renderSplit();
+    $('ccProblem').classList.add('hide');
+  } catch (e) {
+    $('ccProblem').textContent = 'Snapshot refresh failed · showing last loaded data.';
+    $('ccProblem').classList.remove('hide');
+  } finally {
+    ccPending = false;
+  }
+}
+['ccDays', 'ccMachine', 'ccApp', 'ccModel'].forEach(id =>
+  $(id).addEventListener('change', () => {
+    ccPage = 0;
+    renderCc();
+  }),
+);
+$('ccPrevious').addEventListener('click', () => {
+  ccPage--;
+  renderCc();
+});
+$('quotaTabs').addEventListener('click', e => {
+  let b = e.target.closest('button');
+  if (!b) return;
+  quotaProvider = b.dataset.provider;
+  renderQuota();
+  $('quotaTabs').querySelector('[aria-pressed=true]').focus();
+});
+$('outlookChart').addEventListener('pointermove', e => {
+  let chart = e.target.closest('svg');
+  if (chart && outlookPeek) outlookPeek(chart, e);
+});
+$('outlookChart').addEventListener('pointerleave', () =>
+  $('outlookChart').querySelector('svg > g')?.classList.add('hide'),
+);
+$('outlookViews').addEventListener('click', e => {
+  let b = e.target.closest('button');
+  if (!b) return;
+  quotaView = b.dataset.view;
+  for (const x of $('outlookViews').children) x.setAttribute('aria-pressed', String(x === b));
+  renderQuota();
+});
+$('outlookHorizon').addEventListener('change', renderQuota);
 // Reset disables its own button, so move focus to the first filter instead of losing it.
-$('ccReset').addEventListener('click',()=>{for(const id in CC_DEFAULTS)$(id).value=CC_DEFAULTS[id];ccPage=0;renderCc();$('ccDays').focus()});$('ccNext').addEventListener('click',()=>{ccPage++;renderCc()});
+$('ccReset').addEventListener('click', () => {
+  for (const id in CC_DEFAULTS) $(id).value = CC_DEFAULTS[id];
+  ccPage = 0;
+  renderCc();
+  $('ccDays').focus();
+});
+$('ccNext').addEventListener('click', () => {
+  ccPage++;
+  renderCc();
+});
 
-const tick=()=>{refresh();loadQuota();loadUpstream();loadCc()};
+const tick = () => {
+  refresh();
+  loadQuota();
+  loadUpstream();
+  loadCc();
+};
 
-['days','account','model'].forEach(id=>$(id).addEventListener('change',()=>{requestPage=0;refresh()}));$('refresh').addEventListener('click',tick);$('reveal').addEventListener('change',()=>{if(latest)render(latest);renderQuota()});$('onlyFailed').addEventListener('change',()=>{requestPage=0;if(latest)recent()});$('previousPage').addEventListener('click',()=>{if(requestPage>0){requestPage--;recent()}});$('nextPage').addEventListener('click',()=>{requestPage++;recent()});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&$('auto').checked)tick()});
+['days', 'account', 'model'].forEach(id =>
+  $(id).addEventListener('change', () => {
+    requestPage = 0;
+    refresh();
+  }),
+);
+$('refresh').addEventListener('click', tick);
+$('reveal').addEventListener('change', () => {
+  if (latest) render(latest);
+  renderQuota();
+});
+$('onlyFailed').addEventListener('change', () => {
+  requestPage = 0;
+  if (latest) recent();
+});
+$('previousPage').addEventListener('click', () => {
+  if (requestPage > 0) {
+    requestPage--;
+    recent();
+  }
+});
+$('nextPage').addEventListener('click', () => {
+  requestPage++;
+  recent();
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && $('auto').checked) tick();
+});
 // Countdowns keep moving from cached readings even when live refresh is off.
-setInterval(()=>{if(document.hidden)return;if($('auto').checked)tick();else renderQuota()},20000);tick();
+setInterval(() => {
+  if (document.hidden) return;
+  if ($('auto').checked) tick();
+  else renderQuota();
+}, 20000);
+tick();
 </script></body></html>
