@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -128,9 +129,17 @@ def read(machine):
     return validate(json.loads(path.read_text())) if path.exists() else None
 
 
+def read_or_none(machine):
+    """A stored file that no longer validates gives way to the next good snapshot instead of blocking it."""
+    try:
+        return read(machine)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def save(snapshot, since=None):
     snapshot = validate(snapshot)
-    previous = read(snapshot['machine']['id'])
+    previous = read_or_none(snapshot['machine']['id'])
     if previous and stamp(snapshot['generatedAt']) < stamp(previous['generatedAt']):
         raise ValueError('Older snapshot cannot replace newer data')
     replaced = {(r['app'], r['date']) for r in snapshot['rows'] if r['reportedInLatest']}
@@ -146,10 +155,10 @@ def save(snapshot, since=None):
 
 
 def write_json(path, data):
-    STORE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp = None
     try:
-        with tempfile.NamedTemporaryFile(mode='w', dir=STORE, delete=False) as handle:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as handle:
             temp = Path(handle.name)
             json.dump(data, handle, allow_nan=False)
             handle.flush()
@@ -163,7 +172,7 @@ def write_json(path, data):
 def capture():
     global last_full_capture
     now = utcnow()
-    previous = read('aleks-mbp')
+    previous = read_or_none('aleks-mbp')
     # A full report takes seconds, so it runs hourly and after a failure; in between, recent days are enough.
     full = not previous or previous['status'] == 'error' or time.monotonic() - last_full_capture > 3600
     since = None if full else datetime.now(ZoneInfo(ZONE)).date() - timedelta(days=2)
@@ -187,7 +196,7 @@ def capture():
                     rows.append(dict(machineId='aleks-mbp', app=app['agent'], date=day['period'],
                                      model=model.get('modelName'), **counts, totalTokens=sum(counts.values()),
                                      lastReportedAt=now, reportedInLatest=True))
-                if sum(r['totalTokens'] for r in rows if r['app'] == app['agent'] and r['date'] == day['period']) != app['totalTokens']:
+                if sum(r['totalTokens'] for r in rows[-len(models):]) != app['totalTokens']:
                     raise ValueError('Model breakdown does not match ccusage total')
         snapshot = save(dict(base, dataUpdatedAt=now, status='ok', rows=rows, errors=[],
                              source=dict(tool='ccusage', version=version, offline=True, costsIncluded=False)),
@@ -223,10 +232,10 @@ def pull_genius():
             raw = response.read(MAX_SNAPSHOT_BYTES + 1)
             if len(raw) > MAX_SNAPSHOT_BYTES:
                 raise ValueError('Snapshot exceeds four MiB')
-        snapshot = validate(json.loads(raw))
-        if snapshot['machine']['id'] != 'genius':
+        data = json.loads(raw)
+        if data['machine']['id'] != 'genius':
             raise ValueError('Unexpected snapshot machine')
-        save(snapshot)
+        snapshot = save(data)
         health.update(status='ok', lastSuccessAt=utcnow(), successfulPulls=health['successfulPulls'] + 1,
                       snapshotGeneratedAt=snapshot['generatedAt'], httpStatus=200)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -240,13 +249,14 @@ def collect(action=capture):
         start = time.monotonic()
         try:
             action()
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            # Class name only: messages can carry snapshot or network details.
+            print(f'{action.__name__} failed: {type(error).__name__}', file=sys.stderr, flush=True)
         time.sleep(max(1, 60 - (time.monotonic() - start)))
 
 
 def genius_account():
-    snapshot = read('genius')
+    snapshot = read_or_none('genius')
     quota = snapshot and snapshot.get('quota')
     if not quota:
         return None

@@ -16,6 +16,9 @@ Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net
   reviewed commit, never by editing files there.
 - Service: LaunchAgent `com.aleks.cliproxyapi-dashboard` runs
   `/opt/homebrew/bin/python3 ~/.local/share/pool-dashboard-runtime/dashboard/server.py`.
+  Its threads capture local ccusage (a full report hourly, the last two days each minute),
+  pull Genius's snapshot every minute and record quota readings; failures go to
+  `~/.config/cliproxyapi/dashboard.log` by error class only.
 - Collector: LaunchAgent `com.aleks.cliproxyapi-usage` runs `collect-usage.py` from the same
   checkout every 20 seconds. It drains CPA's usage queue into `usage.sqlite3`, keeping only
   allowlisted fields, and refreshes `account-pool.json`.
