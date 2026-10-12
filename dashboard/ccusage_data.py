@@ -272,7 +272,9 @@ def dashboard():
                                generatedAt=None, dataUpdatedAt=None, transport=transport))
             continue
         age = (now - stamp(snapshot['dataUpdatedAt'])).total_seconds() if snapshot['dataUpdatedAt'] else None
-        state = 'error' if snapshot['status'] == 'error' else 'stale' if age is None or age > 180 else 'fresh'
+        # Genius's snapshot often lags successful pulls by a few minutes; only a longer gap suggests its export stopped.
+        limit = 900 if machine == 'genius' and transport.get('status') == 'ok' else 180
+        state = 'error' if snapshot['status'] == 'error' else 'stale' if age is None or age > limit else 'fresh'
         if transport.get('status') == 'error':
             state = 'error'
         states.append(dict(machineId=machine, state=state, generatedAt=snapshot['generatedAt'],
