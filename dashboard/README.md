@@ -6,7 +6,7 @@ Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net
 
 ## Layout
 
-- Code (this directory): `server.py`, `ccusage_data.py`, `index.html`.
+- Code (this directory): `server.py`, `ccusage_data.py`, `index.html`, `collect-usage.py`.
 - Runtime data (never in Git): `~/.config/cliproxyapi/` — `usage.sqlite3`,
   `account-pool.json`, `collector-status.json`, `dashboard/build.json`,
   `dashboard/ccusage-snapshots/`.
@@ -16,6 +16,9 @@ Tailscale Serve exposes it on the tailnet as `https://aleksmbp.tail035f92.ts.net
   reviewed commit, never by editing files there.
 - Service: LaunchAgent `com.aleks.cliproxyapi-dashboard` runs
   `/opt/homebrew/bin/python3 ~/.local/share/pool-dashboard-runtime/dashboard/server.py`.
+- Collector: LaunchAgent `com.aleks.cliproxyapi-usage` runs `collect-usage.py` from the same
+  checkout every 20 seconds. It drains CPA's usage queue into `usage.sqlite3`, keeping only
+  allowlisted fields, and refreshes `account-pool.json`.
 
 ## Checks
 
@@ -34,6 +37,9 @@ launchctl kickstart -k gui/$(id -u)/com.aleks.cliproxyapi-dashboard
 ```
 
 ## Roll back to the pre-Git source
+
+The collector's original stays at `~/.config/cliproxyapi/collect-usage.py`; point
+`com.aleks.cliproxyapi-usage`'s second `ProgramArguments` entry back to it the same way.
 
 The original files remain in `~/.config/cliproxyapi/dashboard/`. Point the LaunchAgent's
 second `ProgramArguments` entry back to `/Users/aleks/.config/cliproxyapi/dashboard/server.py`, then:
