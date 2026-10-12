@@ -248,21 +248,6 @@ function bars(rows, series, label) {
   });
   return svg + '</svg>';
 }
-function trend(rows, cache = false) {
-  return bars(
-    rows,
-    cache
-      ? [
-          ['reads', r => r.cached, '#74dbc4'],
-          ['writes', r => r.cache_write, '#e3b25f'],
-        ]
-      : [
-          ['input', r => r.input, '#74dbc4'],
-          ['output', r => r.output, '#e3b25f'],
-        ],
-    cache ? 'Daily cache read and write tokens' : 'Daily input and output token usage',
-  );
-}
 function histogram(rows) {
   let bounds = [2, 5, 10, 30, Infinity],
     counts = bounds.map((limit, i) => rows.filter(r => r.duration >= [0, ...bounds][i] && r.duration < limit).length),
@@ -368,9 +353,23 @@ function render(d) {
   $('failures').textContent = integer(s.failures);
   $('requestCount').textContent =
     pct(s.requests ? s.failures / s.requests : null) + ' failure rate · ' + integer(s.requests) + ' requests';
-  $('trend').innerHTML = trend(d.daily);
+  $('trend').innerHTML = bars(
+    d.daily,
+    [
+      ['input', r => r.input, '#74dbc4'],
+      ['output', r => r.output, '#e3b25f'],
+    ],
+    'Daily input and output token usage',
+  );
   $('cacheTrend').innerHTML = s.cache_covered
-    ? trend(d.daily, true)
+    ? bars(
+        d.daily,
+        [
+          ['reads', r => r.cached, '#74dbc4'],
+          ['writes', r => r.cache_write, '#e3b25f'],
+        ],
+        'Daily cache read and write tokens',
+      )
     : '<div class="empty">No precise cache accounting in this period.</div>';
   $('cacheTotals').textContent =
     fmt(s.cached) +
@@ -531,6 +530,8 @@ const clock = t =>
     minute: '2-digit',
     hour12: false,
   });
+const localDay = t =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(t);
 // A window is only trusted while its reset is in the future; afterwards the old reading says nothing about the new window.
 // Genius reports only while Claude Code runs there, and that is where the work account is used, so an idle reading still holds.
 function windowState(a, w, now) {
@@ -566,9 +567,7 @@ function quotaMeter(title, st, now) {
   } else {
     tone = st.status === 'rejected' || st.left <= 0 ? 'bad' : /warn/.test(st.status) || st.left < 0.25 ? 'warn' : 'ok';
     value = Math.round(st.left * 100) + '% left';
-    note =
-      (isFinite(st.reset) ? 'Resets in ' + span(st.reset - now) + ' · ' + clock(st.reset) : 'Reset time unknown') +
-      (st.kind === 'stale' ? ' · unverified' : '');
+    note = 'Resets in ' + span(st.reset - now) + ' · ' + clock(st.reset) + (st.kind === 'stale' ? ' · unverified' : '');
   }
   let flag =
     st.status && st.status !== 'allowed'
@@ -597,20 +596,21 @@ function quotaMeter(title, st, now) {
   );
 }
 const WEEK = 604800000;
-const DAY = 86400000,
+const HOUR = 3600000,
+  DAY = 86400000,
   COLORS = ['var(--aqua)', 'var(--amber)', 'var(--blue)', 'var(--green)'];
 // Pace follows this window's stored readings from the last day once they span three hours; before that it is the average
 // since the window began, assuming it opened 7 days before its reset.
 function pace(a, st, now) {
   let seen = time(a.observed_at),
     first = (a.history || []).find(p => p[0] >= now - DAY);
-  if (first && seen - first[0] >= 3 * 3600000)
+  if (first && seen - first[0] >= 3 * HOUR)
     return {
       rate: Math.max(0, (1 - st.left - first[1]) / (seen - first[0])),
       basis: 'over the last ' + span(seen - first[0]),
     };
   let elapsed = now - (st.reset - WEEK);
-  return { rate: elapsed >= 3600000 ? (1 - st.left) / elapsed : null, basis: 'since its window began' };
+  return { rate: elapsed >= HOUR ? (1 - st.left) / elapsed : null, basis: 'since its window began' };
 }
 let quotaProvider = '',
   quotaView = 'remaining',
@@ -620,33 +620,26 @@ function renderOutlook(on, now) {
   let read = on.map(a => ({ a, st: windowState(a, a.seven_day, now) })),
     live = read.filter(x => x.st.kind === 'live'),
     held = read.filter(x => x.st.recent);
-  // A failed refresh keeps the last measured share visible but must not feed any estimate.
-  if (!live.length && held.length && (quotaError || quota.error)) {
-    $('outlookLeft').textContent = Math.round(held.reduce((n, x) => n + x.st.left, 0) * 100) + '%';
-    $('outlookOf').textContent = '/ ' + held.length * 100 + '% remaining · last measured';
-    $('outlookRate').textContent = '';
-    $('outlookNext').textContent = '';
-    $('outlookChart').innerHTML =
-      '<div class="empty">Forecast paused · the latest quota refresh failed, so no estimate is drawn from older readings.</div>';
-    $('outlookNote').textContent = '';
-    $('outlookKey').textContent = '';
-    return;
-  }
   if (!live.length) {
-    $('outlookLeft').textContent = '—';
-    $('outlookOf').textContent = 'No current 7-day reading';
-    $('outlookRate').textContent = '';
-    $('outlookNext').textContent = '';
+    // A failed refresh keeps the last measured share visible but must not feed any estimate.
+    let paused = held.length && (quotaError || quota.error);
+    $('outlookLeft').textContent = paused ? Math.round(held.reduce((n, x) => n + x.st.left, 0) * 100) + '%' : '—';
+    $('outlookOf').textContent = paused
+      ? '/ ' + held.length * 100 + '% remaining · last measured'
+      : 'No current 7-day reading';
+    for (const id of ['outlookRate', 'outlookNext', 'outlookNote', 'outlookKey']) $(id).textContent = '';
     $('outlookChart').innerHTML =
-      '<div class="empty">Forecast unavailable · it needs a fresh 7-day reading from at least one enabled account.</div>';
-    $('outlookNote').textContent = '';
-    $('outlookKey').textContent = '';
+      '<div class="empty">' +
+      (paused
+        ? 'Forecast paused · the latest quota refresh failed, so no estimate is drawn from older readings.'
+        : 'Forecast unavailable · it needs a fresh 7-day reading from at least one enabled account.') +
+      '</div>';
     return;
   }
   live.forEach((x, i) => Object.assign(x, pace(x.a, x.st, now), { color: COLORS[i % COLORS.length] }));
   let known = live.filter(x => x.rate != null),
     capacity = live.length,
-    end = now + Number($('outlookHorizon').value || 7) * 86400000;
+    end = now + Number($('outlookHorizon').value || 7) * DAY;
   // After its known reset an account restarts at 100% and drains at the same estimated pace; a 7-day horizon cannot hold a second reset.
   const one = (x, t) => {
       let r = x.rate || 0;
@@ -655,7 +648,7 @@ function renderOutlook(on, now) {
     at = t => live.reduce((n, x) => n + one(x, t), 0);
   // Before now each account shows its stored readings: the latest one at or before that moment, or nothing if none is that old.
   const measured = (x, t) => {
-      let p = (x.a.history || []).filter(p => p[0] <= t).pop();
+      let p = (x.a.history || []).findLast(p => p[0] <= t);
       return t >= now ? x.st.left : p ? 1 - p[1] : null;
     },
     past = t => {
@@ -665,7 +658,7 @@ function renderOutlook(on, now) {
   $('outlookLeft').textContent = Math.round(at(now) * 100) + '%';
   $('outlookOf').textContent = '/ ' + capacity * 100 + '% remaining';
   $('outlookRate').textContent = known.length
-    ? '~' + (known.reduce((n, x) => n + x.rate, 0) * 360000000).toFixed(1) + '% per hour · estimate'
+    ? '~' + (known.reduce((n, x) => n + x.rate, 0) * HOUR * 100).toFixed(1) + '% per hour · estimate'
     : 'Pace unknown';
   const runsOut = x => (x.rate > 0 && now + x.st.left / x.rate < x.st.reset ? now + x.st.left / x.rate : null);
   let next = live.slice().sort((x, y) => x.st.reset - y.st.reset)[0],
@@ -699,7 +692,7 @@ function renderOutlook(on, now) {
           '</span><strong>' +
           (x.rate == null
             ? 'Pace unknown'
-            : '~' + (x.rate * 360000000).toFixed(2) + '% of its week per hour · ' + x.basis) +
+            : '~' + (x.rate * HOUR * 100).toFixed(2) + '% of its week per hour · ' + x.basis) +
           '</strong><div class="meter" role="img" aria-label="' +
           Math.round(used * 100) +
           '% of the week used"><span style="width:' +
@@ -732,7 +725,7 @@ function renderOutlook(on, now) {
       bottom = 34,
       plot = height - top - bottom,
       stamps = live.flatMap(x => (x.a.history || []).map(p => p[0])).filter(t => t >= now - DAY && t < now),
-      begin = stamps.some(t => t < now - 3600000) ? Math.min(...stamps) : now,
+      begin = stamps.some(t => t < now - HOUR) ? Math.min(...stamps) : now,
       X = t => left + ((t - begin) / (end - begin)) * (width - left - right),
       Y = v => top + plot * (1 - v / capacity),
       times = [];
@@ -920,8 +913,8 @@ function renderOutlook(on, now) {
           ': ' +
           (x.rate == null
             ? 'window just started · pace unknown'
-            : x.rate > 0 && now + x.st.left / x.rate < x.st.reset
-              ? 'runs out in ~' + span(x.st.left / x.rate) + ' at this pace, before its reset ' + clock(x.st.reset)
+            : runsOut(x)
+              ? 'runs out in ~' + span(runsOut(x) - now) + ' at this pace, before its reset ' + clock(x.st.reset)
               : 'lasts until its reset ' + clock(x.st.reset) + ' at this pace'),
       )
       .join(' · ') +
@@ -1000,9 +993,8 @@ function renderQuota() {
     .map(a => ({ a, st: windowState(a, a.seven_day, now) }))
     .filter(x => x.st.kind === 'live' || x.st.kind === 'stale')
     .sort((x, y) => x.st.reset - y.st.reset)[0];
-  $('poolReset').textContent = next && isFinite(next.st.reset) ? span(next.st.reset - now) : '—';
-  $('poolResetSub').textContent =
-    next && isFinite(next.st.reset) ? label(next.a.name) + ' · ' + clock(next.st.reset) : 'No current 7-day reading';
+  $('poolReset').textContent = next ? span(next.st.reset - now) : '—';
+  $('poolResetSub').textContent = next ? label(next.a.name) + ' · ' + clock(next.st.reset) : 'No current 7-day reading';
   $('poolRoute').textContent = human(quota.strategy) || '—';
   $('poolRouteSub').textContent = [
     quota.priority_policy && 'Priority: ' + human(quota.priority_policy).toLowerCase(),
@@ -1137,12 +1129,7 @@ function renderCc() {
       .map(m => '<option value="' + escape(m) + '">' + escape(m) + '</option>')
       .join('');
   $('ccModel').value = selected;
-  const today = new Intl.DateTimeFormat('en-CA', {
-      timeZone: TZ,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).format(new Date()),
+  const today = localDay(new Date()),
     start = new Date(today + 'T00:00:00Z');
   start.setUTCDate(start.getUTCDate() - Number($('ccDays').value) + 1);
   const first = start.toISOString().slice(0, 10),
@@ -1334,9 +1321,7 @@ function renderCc() {
 }
 function renderSplit() {
   const cpa = ccData.cpaFromGenius,
-    ready = ['aleks-mbp', 'genius'].every(id => ccData.machines.find(m => m.machineId === id)?.dataUpdatedAt),
-    day = t =>
-      new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(t);
+    ready = ['aleks-mbp', 'genius'].every(id => ccData.machines.find(m => m.machineId === id)?.dataUpdatedAt);
   if (!cpa?.since || !ready) {
     for (const id of ['splitPersonal', 'splitWork', 'splitShare', 'splitSince']) $(id).textContent = '—';
     $('splitPersonalDetail').textContent =
@@ -1354,10 +1339,10 @@ function renderSplit() {
       '</div>';
     return;
   }
-  const today = day(new Date()),
+  const today = localDay(new Date()),
     start = new Date(today + 'T00:00:00Z');
   start.setUTCDate(start.getUTCDate() - 29);
-  const first = [day(new Date(cpa.since)), start.toISOString().slice(0, 10)].sort()[1],
+  const first = [localDay(new Date(cpa.since)), start.toISOString().slice(0, 10)].sort()[1],
     rows = [],
     claude = (id, date) =>
       ccData.rows

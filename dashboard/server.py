@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import ccusage_data
 
 ROOT = Path.home() / '.config/cliproxyapi'
-ZONE = ZoneInfo('America/Mexico_City')
+ZONE = ZoneInfo(ccusage_data.ZONE)
 UPDATE_LOCK = threading.Lock()
 UPDATE_CACHE = {}
 HISTORY = ROOT / 'dashboard/quota-history.sqlite3'
@@ -35,7 +35,7 @@ def upstream_status():
             tip = github('commits/HEAD')['sha']
             comparison = github('compare/' + build['base_commit'] + '...' + tip)
             state = comparison['status']
-            result.update(tip_commit=tip, commits_behind=comparison['ahead_by'],
+            result.update(commits_behind=comparison['ahead_by'],
                           status='current' if state == 'identical' else 'outdated' if state == 'ahead' else 'diverged',
                           compare_url='https://github.com/router-for-me/CLIProxyAPI/compare/' + build['base_commit'] + '...' + tip)
         except (OSError, ValueError, KeyError):
@@ -59,7 +59,7 @@ def normalize(record):
     input_total = number(inp.get('total_tokens')) if accurate else max(0, total - output)
     read = number(inp.get('cache_read_tokens')) if accurate else number(tokens.get('cache_read_tokens')) if explicit else None
     write = number(inp.get('cache_write_tokens')) if accurate else number(tokens.get('cache_creation_tokens')) if explicit else None
-    timestamp = datetime.fromisoformat(record['timestamp'].replace('Z', '+00:00')).astimezone(ZONE)
+    timestamp = ccusage_data.stamp(record['timestamp']).astimezone(ZONE)
     return dict(timestamp=timestamp.isoformat(), date=timestamp.date().isoformat(), hour=timestamp.hour,
                 account=record.get('source') or 'Unknown account', model=record.get('model') or 'Unknown model',
                 input=input_total, output=output, total=total, read=read, write=write,
@@ -102,13 +102,17 @@ def account_activity(rows):
                 last_change=changed[-1][1]['timestamp'] if changed else None)
 
 
+def readonly(path):
+    return sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+
+
 def cpa_from_genius():
     """Daily tokens Genius sent through CPA, counted only since the collector began keeping each request's source."""
     try:
         genius = {info[4][0] for info in socket.getaddrinfo(urlparse(ccusage_data.GENIUS_URL).hostname, None)}
     except OSError:
         return None
-    with sqlite3.connect(f'file:{ROOT / "usage.sqlite3"}?mode=ro', uri=True) as db:
+    with readonly(ROOT / 'usage.sqlite3') as db:
         records = [json.loads(row[0]) for row in
                    db.execute("SELECT record FROM requests WHERE json_extract(record, '$.client') IS NOT NULL")]
     days, rows = {}, [(record['client'], normalize(record)) for record in records]
@@ -127,13 +131,13 @@ def load(query):
     # Only records near the period are parsed; the one-day margin covers records written in another UTC offset,
     # and the exact range check below still applies.
     margin = (start - timedelta(days=1)).date().isoformat()
-    with sqlite3.connect(f'file:{ROOT / "usage.sqlite3"}?mode=ro', uri=True) as db:
+    with readonly(ROOT / 'usage.sqlite3') as db:
         rows = [normalize(json.loads(row[0])) for row in
                 db.execute("SELECT record FROM requests WHERE substr(json_extract(record, '$.timestamp'), 1, 10) >= ?", (margin,))]
         options = {key: [name for (name,) in db.execute(
             f"SELECT DISTINCT coalesce(nullif(json_extract(record, '$.{field}'), ''), ?) FROM requests ORDER BY 1", (empty,))]
             for key, field, empty in (('accounts', 'source', 'Unknown account'), ('models', 'model', 'Unknown model'))}
-        first, last = db.execute("SELECT min(json_extract(record, '$.timestamp')), max(json_extract(record, '$.timestamp')) FROM requests").fetchone()
+        first = db.execute("SELECT min(json_extract(record, '$.timestamp')) FROM requests").fetchone()[0]
     rows = [r for r in rows if start <= datetime.fromisoformat(r['timestamp']) <= now]
     for field in ('account', 'model'):
         selected = query.get(field, [''])[0]
@@ -143,20 +147,20 @@ def load(query):
     for field in ('account', 'model'):
         groups[field] = [dict(name=name, **summarize([r for r in rows if r[field] == name]))
                          for name in sorted({r[field] for r in rows})]
-    daily = []
-    for offset in range(days):
-        date = (start + timedelta(days=offset)).date().isoformat()
-        daily.append(dict(date=date, **summarize([r for r in rows if r['date'] == date])))
-    hours = [sum(r['hour'] == hour for r in rows) for hour in range(24)]
+    by_date, hours = {}, [0] * 24
+    for r in rows:
+        by_date.setdefault(r['date'], []).append(r)
+        hours[r['hour']] += 1
+    dates = [(start + timedelta(days=offset)).date().isoformat() for offset in range(days)]
+    daily = [dict(date=date, **summarize(by_date.get(date, []))) for date in dates]
     status_file = ROOT / 'collector-status.json'
     health = json.loads(status_file.read_text()) if status_file.exists() else {}
     stamp = health.get('last_success')
     age = max(0, (now - datetime.fromisoformat(stamp)).total_seconds()) if stamp else None
     data = dict(summary=summarize(rows), account_activity=account_activity(rows), groups=groups, daily=daily, hours=hours, options=options,
                 recent=sorted(rows, key=lambda r: r['timestamp'], reverse=True)[:100],
-                generated=now.isoformat(), timezone=str(ZONE), collector_age=age,
-                history_start=first and normalize(dict(timestamp=first))['timestamp'],
-                last_request=last and normalize(dict(timestamp=last))['timestamp'])
+                generated=now.isoformat(), collector_age=age,
+                history_start=first and ccusage_data.stamp(first).astimezone(ZONE).isoformat())
     return data, rows
 
 
@@ -171,7 +175,7 @@ def accounts():
 
 
 def epoch(stamp):
-    return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+    return ccusage_data.stamp(stamp).timestamp()
 
 
 def record_quota():
@@ -192,7 +196,7 @@ def record_quota():
 def with_history(pool):
     if not HISTORY.exists():
         return pool
-    with sqlite3.connect(f'file:{HISTORY}?mode=ro', uri=True) as db:
+    with readonly(HISTORY) as db:
         readings = db.execute('SELECT account, at, used, reset FROM readings ORDER BY at').fetchall()
     for account in pool['accounts']:
         week = account.get('seven_day') or {}

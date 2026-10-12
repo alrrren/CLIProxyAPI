@@ -38,9 +38,6 @@ launchctl kickstart -k gui/$(id -u)/com.aleks.cliproxyapi-dashboard
 
 ## Roll back to the pre-Git source
 
-The collector's original stays at `~/.config/cliproxyapi/collect-usage.py`; point
-`com.aleks.cliproxyapi-usage`'s second `ProgramArguments` entry back to it the same way.
-
 The original files remain in `~/.config/cliproxyapi/dashboard/`. Point the LaunchAgent's
 second `ProgramArguments` entry back to `/Users/aleks/.config/cliproxyapi/dashboard/server.py`, then:
 
@@ -48,3 +45,6 @@ second `ProgramArguments` entry back to `/Users/aleks/.config/cliproxyapi/dashbo
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.aleks.cliproxyapi-dashboard.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aleks.cliproxyapi-dashboard.plist
 ```
+
+The collector's original stays at `~/.config/cliproxyapi/collect-usage.py`; point
+`com.aleks.cliproxyapi-usage`'s second `ProgramArguments` entry back to it the same way.

@@ -138,26 +138,30 @@ def save(snapshot):
         if (row['app'], row['date']) not in replaced and key not in incoming:
             incoming[key] = dict(row, reportedInLatest=False)
     snapshot['rows'] = sorted(incoming.values(), key=lambda r: (r['date'], r['app'], r['model'] or ''))
-    snapshot['coverage'].update(reportedRows=sum(r['reportedInLatest'] for r in snapshot['rows']),
-                                retainedHistoricalRows=sum(not r['reportedInLatest'] for r in snapshot['rows']))
+    write_json(STORE / (snapshot['machine']['id'] + '.json'), snapshot)
+    return snapshot
+
+
+def write_json(path, data):
     STORE.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', dir=STORE, delete=False) as handle:
             temp = Path(handle.name)
-            json.dump(snapshot, handle, allow_nan=False)
+            json.dump(data, handle, allow_nan=False)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, STORE / (snapshot['machine']['id'] + '.json'))
+        os.replace(temp, path)
     finally:
         if temp and temp.exists():
             temp.unlink()
-    return snapshot
 
 
 def capture():
     now = utcnow()
     previous = read('aleks-mbp')
+    base = dict(schemaVersion=1, machine={'id': 'aleks-mbp'}, timezone=ZONE, generatedAt=now,
+                coverage=dict(counterSemantics=SEMANTICS))
     try:
         result = subprocess.run(['/opt/homebrew/bin/ccusage', *COMMAND], capture_output=True, text=True,
                                 timeout=55, check=True)
@@ -177,17 +181,14 @@ def capture():
                                      lastReportedAt=now, reportedInLatest=True))
                 if sum(r['totalTokens'] for r in rows if r['app'] == app['agent'] and r['date'] == day['period']) != app['totalTokens']:
                     raise ValueError('Model breakdown does not match ccusage total')
-        snapshot = dict(schemaVersion=1, machine={'id': 'aleks-mbp'}, timezone=ZONE, generatedAt=now,
-                        dataUpdatedAt=now, status='ok', source=dict(tool='ccusage', version=version,
-                        offline=True, costsIncluded=False), coverage=dict(counterSemantics=SEMANTICS), rows=rows, errors=[])
-        return save(snapshot)
+        return save(dict(base, dataUpdatedAt=now, status='ok', rows=rows, errors=[],
+                         source=dict(tool='ccusage', version=version, offline=True, costsIncluded=False)))
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
-        snapshot = previous or dict(schemaVersion=1, machine={'id': 'aleks-mbp'}, timezone=ZONE,
-                        dataUpdatedAt=None, source=dict(tool='ccusage', version='unknown', offline=True,
-                        costsIncluded=False), coverage=dict(counterSemantics=SEMANTICS), rows=[])
-        snapshot.update(generatedAt=now, status='error', errors=[dict(source='ccusage', code='capture_failed', at=now)])
-        snapshot['rows'] = [dict(row, reportedInLatest=False) for row in snapshot['rows']]
-        return save(snapshot)
+        # save() carries the previous rows forward, marked as no longer reported.
+        source = previous['source'] if previous else dict(tool='ccusage', version='unknown', offline=True,
+                                                          costsIncluded=False)
+        return save(dict(base, dataUpdatedAt=previous and previous['dataUpdatedAt'], status='error', source=source,
+                         rows=[], errors=[dict(source='ccusage', code='capture_failed', at=now)]))
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -218,17 +219,7 @@ def pull_genius():
                       snapshotGeneratedAt=snapshot['generatedAt'], httpStatus=200)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         health['error'] = 'snapshot_pull_failed'
-    STORE.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode='w', dir=STORE, delete=False) as handle:
-        temp = Path(handle.name)
-        json.dump(health, handle)
-        handle.flush()
-        os.fsync(handle.fileno())
-    try:
-        os.replace(temp, health_file)
-    finally:
-        if temp.exists():
-            temp.unlink()
+    write_json(health_file, health)
     return health
 
 
@@ -258,28 +249,26 @@ def dashboard():
     states, rows = [], []
     now = datetime.now(timezone.utc)
     for machine in MACHINES:
-        transport = {}
+        transport, pulls = {}, STORE / (machine + '-pull.json')
         try:
             snapshot = read(machine)
-            if machine == 'genius' and (STORE / 'genius-pull.json').exists():
-                transport = json.loads((STORE / 'genius-pull.json').read_text())
+            if pulls.exists():
+                transport = json.loads(pulls.read_text())
         except (OSError, ValueError, KeyError, TypeError):
-            snapshot = None
-            states.append(dict(machineId=machine, state='error', generatedAt=None, dataUpdatedAt=None))
+            states.append(dict(machineId=machine, state='error', dataUpdatedAt=None))
             continue
         if snapshot is None:
             states.append(dict(machineId=machine, state='error' if transport.get('status') == 'error' else 'pending',
-                               generatedAt=None, dataUpdatedAt=None, transport=transport))
+                               dataUpdatedAt=None, transport=transport))
             continue
         age = (now - stamp(snapshot['dataUpdatedAt'])).total_seconds() if snapshot['dataUpdatedAt'] else None
-        # Genius's snapshot often lags successful pulls by a few minutes; only a longer gap suggests its export stopped.
-        limit = 900 if machine == 'genius' and transport.get('status') == 'ok' else 180
+        # A pulled snapshot often lags successful pulls by a few minutes; only a longer gap suggests its export stopped.
+        limit = 900 if transport.get('status') == 'ok' else 180
         state = 'error' if snapshot['status'] == 'error' else 'stale' if age is None or age > limit else 'fresh'
         if transport.get('status') == 'error':
             state = 'error'
-        states.append(dict(machineId=machine, state=state, generatedAt=snapshot['generatedAt'],
-                           dataUpdatedAt=snapshot['dataUpdatedAt'], coverage=snapshot['coverage'], source=snapshot['source'],
-                           transport=transport))
+        states.append(dict(machineId=machine, state=state, dataUpdatedAt=snapshot['dataUpdatedAt'],
+                           coverage=snapshot['coverage'], transport=transport))
         rows.extend(snapshot['rows'])
     return dict(schemaVersion=1, generatedAt=utcnow(), timezone=ZONE, machines=states, rows=rows)
 
@@ -289,7 +278,7 @@ if __name__ == '__main__':
     parser.add_argument('--import-snapshot', type=Path)
     args = parser.parse_args()
     if args.import_snapshot:
-        if args.import_snapshot.stat().st_size > 4 * 1024 * 1024:
+        if args.import_snapshot.stat().st_size > MAX_SNAPSHOT_BYTES:
             parser.error('Snapshot exceeds four MiB')
         snapshot = validate(json.loads(args.import_snapshot.read_text()))
         if snapshot['machine']['id'] != 'genius':
