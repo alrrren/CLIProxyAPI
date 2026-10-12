@@ -144,6 +144,8 @@ class Handler(BaseHTTPRequestHandler):
                 mime = 'text/html; charset=utf-8'
             elif parsed.path == '/api/accounts':
                 pool = json.loads((ROOT / 'account-pool.json').read_bytes())
+                # Aleks uses the work account on Genius, so CPA's disabled copy of it is noise.
+                pool['accounts'] = [a for a in pool['accounts'] if not (a.get('name') == 'Work' and a.get('disabled'))]
                 work = ccusage_data.genius_account()
                 if work:
                     pool['accounts'].append(work)
