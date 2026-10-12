@@ -17,6 +17,7 @@ ROOT = Path.home() / '.config/cliproxyapi'
 ZONE = ZoneInfo('America/Mexico_City')
 UPDATE_LOCK = threading.Lock()
 UPDATE_CACHE = {}
+HISTORY = ROOT / 'dashboard/quota-history.sqlite3'
 
 
 def upstream_status():
@@ -154,6 +155,49 @@ def load(query):
     return data, rows
 
 
+def accounts():
+    pool = json.loads((ROOT / 'account-pool.json').read_bytes())
+    # Aleks uses the work account on Genius, so CPA's disabled copy of it is noise.
+    pool['accounts'] = [a for a in pool['accounts'] if not (a.get('name') == 'Work' and a.get('disabled'))]
+    work = ccusage_data.genius_account()
+    if work:
+        pool['accounts'].append(work)
+    return pool
+
+
+def epoch(stamp):
+    return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+
+
+def record_quota():
+    """Keeps each new 7-day reading, so pace can follow recent use instead of the whole window's average."""
+    rows = [(a['name'], epoch(a['observed_at']), a['seven_day']['utilization'], epoch(a['seven_day']['resets_at']))
+            for a in accounts()['accounts']
+            if not a.get('disabled') and not a.get('quota_error') and a.get('observed_at') and a.get('seven_day') and
+            isinstance(a['seven_day'].get('utilization'), (int, float)) and a['seven_day'].get('resets_at')]
+    try:
+        with sqlite3.connect(HISTORY) as db:
+            db.execute('CREATE TABLE IF NOT EXISTS readings (account TEXT, at REAL, used REAL, reset REAL, PRIMARY KEY (account, at))')
+            db.executemany('INSERT OR IGNORE INTO readings VALUES (?, ?, ?, ?)', rows)
+            db.execute('DELETE FROM readings WHERE at < ?', (time.time() - 8 * 86400,))
+    except sqlite3.Error:
+        pass
+
+
+def with_history(pool):
+    if not HISTORY.exists():
+        return pool
+    with sqlite3.connect(f'file:{HISTORY}?mode=ro', uri=True) as db:
+        readings = db.execute('SELECT account, at, used, reset FROM readings ORDER BY at').fetchall()
+    for account in pool['accounts']:
+        week = account.get('seven_day') or {}
+        reset = epoch(week['resets_at']) if week.get('resets_at') else None
+        # Only readings from the current window describe its pace; the reset time can drift by seconds between readings.
+        account['history'] = [[at * 1000, used] for name, at, used, r in readings
+                              if name == account['name'] and reset and abs(r - reset) < 3600]
+    return pool
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -162,13 +206,7 @@ class Handler(BaseHTTPRequestHandler):
                 content = Path(__file__).with_name('index.html').read_bytes()
                 mime = 'text/html; charset=utf-8'
             elif parsed.path == '/api/accounts':
-                pool = json.loads((ROOT / 'account-pool.json').read_bytes())
-                # Aleks uses the work account on Genius, so CPA's disabled copy of it is noise.
-                pool['accounts'] = [a for a in pool['accounts'] if not (a.get('name') == 'Work' and a.get('disabled'))]
-                work = ccusage_data.genius_account()
-                if work:
-                    pool['accounts'].append(work)
-                content = json.dumps(pool, allow_nan=False).encode()
+                content = json.dumps(with_history(accounts()), allow_nan=False).encode()
                 mime = 'application/json'
             elif parsed.path == '/api/ccusage':
                 content = json.dumps(dict(ccusage_data.dashboard(), cpaFromGenius=cpa_from_genius()), allow_nan=False).encode()
@@ -218,4 +256,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     threading.Thread(target=ccusage_data.collect, daemon=True).start()
     threading.Thread(target=ccusage_data.collect, args=(ccusage_data.pull_genius,), daemon=True).start()
+    threading.Thread(target=ccusage_data.collect, args=(record_quota,), daemon=True).start()
     ThreadingHTTPServer(('127.0.0.1', 8320), Handler).serve_forever()
