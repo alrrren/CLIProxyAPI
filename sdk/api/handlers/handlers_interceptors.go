@@ -1,17 +1,18 @@
 package handlers
 
 import (
-	"encoding/json"
 	"maps"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"golang.org/x/net/context"
@@ -117,8 +118,29 @@ type requestLifecycleTracker struct {
 }
 
 func (h *BaseAPIHandler) newRequestLifecycleTracker(ctx context.Context, sourceFormat, model, requestedModel string, stream bool, metadata map[string]any, skipPluginID string) *requestLifecycleTracker {
-	requestID := uuid.NewString()
+	var requestID string
+	if metadata != nil {
+		if existing, _ := metadata[coreexecutor.RequestIDMetadataKey].(string); strings.TrimSpace(existing) != "" {
+			requestID = strings.TrimSpace(existing)
+		}
+	}
+	if requestID == "" {
+		requestID = coreauth.ContinuitySessionRequestID(ctx)
+	}
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
 	traceID := logging.GetRequestID(ctx)
+	if metadata != nil {
+		if existing, _ := metadata[coreexecutor.RequestIDMetadataKey].(string); strings.TrimSpace(existing) == "" {
+			metadata[coreexecutor.RequestIDMetadataKey] = requestID
+		}
+		if traceID != "" {
+			if existing, _ := metadata[coreexecutor.TraceIDMetadataKey].(string); strings.TrimSpace(existing) == "" {
+				metadata[coreexecutor.TraceIDMetadataKey] = traceID
+			}
+		}
+	}
 	return &requestLifecycleTracker{
 		ctx:          ctx,
 		host:         h.interceptorHost(),
@@ -393,8 +415,8 @@ func (c *requestAfterAuthCapture) record(req coreexecutor.RequestAfterAuthInterc
 	var originalRequest []byte
 	originalRequestReplaced := false
 	if len(resp.Body) > 0 {
-		body = cloneBytes(resp.Body)
-		originalRequest = cloneBytes(resp.Body)
+		body = resp.Body
+		originalRequest = resp.Body
 		originalRequestReplaced = true
 	}
 	path := strings.TrimSpace(resp.Path)
@@ -419,8 +441,8 @@ func (c *requestAfterAuthCapture) apply(req coreexecutor.Request, opts coreexecu
 		return req, opts
 	}
 	if c.originalRequestReplaced {
-		req.Payload = cloneBytes(c.body)
-		opts.OriginalRequest = cloneBytes(c.originalRequest)
+		req.Payload = c.body
+		opts.OriginalRequest = c.originalRequest
 	}
 	opts.Headers = cloneHeader(c.headers)
 	if c.path != "" {
@@ -509,8 +531,8 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 	}, skipPluginID)
 	opts.Headers = finalInterceptorHeaders(opts.Headers, resp.Headers)
 	if len(resp.Body) > 0 {
-		req.Payload = cloneBytes(resp.Body)
-		opts.OriginalRequest = cloneBytes(resp.Body)
+		req.Payload = resp.Body
+		opts.OriginalRequest = resp.Body
 	}
 	if strings.TrimSpace(resp.Path) != "" {
 		if opts.Metadata == nil {
@@ -524,6 +546,41 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 		return req, opts, requestTerminationError(resp)
 	}
 	return req, opts, nil
+}
+
+func (h *BaseAPIHandler) requestBeforeAuthInterceptor(requestID, skipPluginID string) coreexecutor.RequestBeforeAuthInterceptor {
+	if !requestInterceptorsEnabled(h.interceptorHost()) {
+		return nil
+	}
+	return func(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest) coreexecutor.RequestAfterAuthInterceptResponse {
+		host := h.interceptorHost()
+		if !requestInterceptorsEnabled(host) {
+			return coreexecutor.RequestAfterAuthInterceptResponse{}
+		}
+		resp := interceptRequestBeforeAuth(ctx, host, pluginapi.RequestInterceptRequest{
+			RequestID:      requestID,
+			TraceID:        logging.GetRequestID(ctx),
+			SourceFormat:   req.SourceFormat.String(),
+			ToFormat:       "",
+			Model:          req.Model,
+			RequestedModel: req.RequestedModel,
+			Stream:         req.Stream,
+			Headers:        cloneHeader(req.Headers),
+			Body:           req.Body,
+			CallerScope:    callerScopeFromMetadata(req.Metadata),
+			Metadata:       req.Metadata,
+		}, skipPluginID)
+		return coreexecutor.RequestAfterAuthInterceptResponse{
+			Path:            strings.TrimSpace(resp.Path),
+			Headers:         resp.Headers,
+			Body:            resp.Body,
+			ClearHeaders:    resp.ClearHeaders,
+			Terminate:       resp.Terminate,
+			StatusCode:      normalizedTerminationStatus(resp.StatusCode),
+			ResponseHeaders: resp.ResponseHeaders,
+			ResponseBody:    resp.ResponseBody,
+		}
+	}
 }
 
 func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCapture, requestID, skipPluginID string) coreexecutor.RequestAfterAuthInterceptor {
@@ -639,6 +696,48 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 // ModelDetailIDContextKey requests selection from the final, plugin-filtered catalog.
 const ModelDetailIDContextKey = "cliproxy.model_detail_id"
 
+// Metadata keys carrying downstream caller identity to model-directory interceptors.
+const (
+	modelListAccessProviderMetadataKey = "access_provider"
+	modelListFrontendAuthMetadataKey   = "frontend_auth_metadata"
+)
+
+// modelListInterceptorMetadata assembles the caller identity metadata forwarded to model-list
+// response interceptors and lifecycle events, mirroring the metadata built for execution paths.
+func modelListInterceptorMetadata(c *gin.Context) map[string]any {
+	if c == nil {
+		return nil
+	}
+	var meta map[string]any
+	setMeta := func(key string, value any) {
+		if meta == nil {
+			meta = make(map[string]any)
+		}
+		meta[key] = value
+	}
+	if callerScope := requestCallerScope(c); callerScope != "" {
+		setMeta(coreexecutor.CallerScopeMetadataKey, callerScope)
+	}
+	if provider, ok := c.Get("accessProvider"); ok {
+		if providerName, isString := provider.(string); isString && strings.TrimSpace(providerName) != "" {
+			setMeta(modelListAccessProviderMetadataKey, strings.TrimSpace(providerName))
+		}
+	}
+	if rawMetadata, ok := c.Get("accessMetadata"); ok {
+		switch authMetadata := rawMetadata.(type) {
+		case map[string]string:
+			if len(authMetadata) > 0 {
+				setMeta(modelListFrontendAuthMetadataKey, maps.Clone(authMetadata))
+			}
+		case map[string]any:
+			if len(authMetadata) > 0 {
+				setMeta(modelListFrontendAuthMetadataKey, maps.Clone(authMetadata))
+			}
+		}
+	}
+	return meta
+}
+
 // WriteModelListResponse serializes the model-list payload, applies plugin response interceptors
 // if a plugin host is configured, and writes the resulting headers and body to the Gin context.
 func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat string, payload any) {
@@ -673,7 +772,8 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 				ctx = reqCtx
 			}
 		}
-		lifecycle = h.newRequestLifecycleTracker(ctx, sourceFormat, "", "", false, nil, "")
+		metadata := modelListInterceptorMetadata(c)
+		lifecycle = h.newRequestLifecycleTracker(ctx, sourceFormat, "", "", false, metadata, "")
 		resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
 			RequestID:       lifecycle.requestID(),
 			SourceFormat:    sourceFormat,
@@ -686,7 +786,7 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 			RequestBody:     nil,
 			Body:            cloneBytes(body),
 			StatusCode:      http.StatusOK,
-			Metadata:        nil,
+			Metadata:        metadata,
 		}, "")
 		if len(resp.Body) > 0 {
 			body = cloneBytes(resp.Body)
