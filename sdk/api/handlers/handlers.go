@@ -5,7 +5,6 @@ package handlers
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -25,7 +26,7 @@ import (
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"golang.org/x/net/context"
 )
 
@@ -55,8 +56,9 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
-	defaultStreamingBootstrapRetries = 0
+	defaultStreamingKeepAliveSeconds   = 0
+	defaultStreamingBootstrapRetries   = 0
+	defaultContinuityKeepAliveInterval = 10 * time.Second
 	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
@@ -157,6 +159,23 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	return payload
 }
 
+var streamingKeepAliveTickerFactory func(interval time.Duration) (<-chan time.Time, func())
+var streamingKeepAliveTickerWithResetFactory func(interval time.Duration) (<-chan time.Time, func(), func())
+var continuityKeepAliveTickerFactory func(interval time.Duration) (<-chan time.Time, func())
+var continuityKeepAliveIntervalOverride time.Duration
+
+func defaultStreamingKeepAliveTickerWithReset(interval time.Duration) (<-chan time.Time, func(), func()) {
+	ticker := time.NewTicker(interval)
+	reset := func() {
+		ticker.Reset(interval)
+		select {
+		case <-ticker.C:
+		default:
+		}
+	}
+	return ticker.C, ticker.Stop, reset
+}
+
 // StreamingKeepAliveInterval returns the streaming keep-alive interval for this server (SSE heartbeats and WebSocket Ping frames).
 // Returning 0 disables keep-alives (default when unset).
 func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
@@ -168,6 +187,110 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 		return 0
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+// StreamingSendKeepAliveBeforeFT returns whether SSE keep-alives should be sent before the first token arrives.
+// It is active only when streaming.send-keepalive-before-ft is true and streaming.keepalive-seconds > 0.
+func StreamingSendKeepAliveBeforeFT(cfg *config.SDKConfig) bool {
+	return cfg != nil && cfg.Streaming.SendKeepAliveBeforeFT && StreamingKeepAliveInterval(cfg) > 0
+}
+
+// NewStreamingKeepAliveTickerWithReset returns a ticker channel, a stop function, and a reset function
+// for streaming keep-alives. When interval <= 0, it returns a nil channel and no-op functions.
+func NewStreamingKeepAliveTickerWithReset(interval time.Duration) (<-chan time.Time, func(), func()) {
+	if interval <= 0 {
+		return nil, func() {}, func() {}
+	}
+	if streamingKeepAliveTickerWithResetFactory != nil {
+		return streamingKeepAliveTickerWithResetFactory(interval)
+	}
+	if streamingKeepAliveTickerFactory != nil {
+		keepAliveC, stop := streamingKeepAliveTickerFactory(interval)
+		return keepAliveC, stop, func() {}
+	}
+	return defaultStreamingKeepAliveTickerWithReset(interval)
+}
+
+// NewStreamingKeepAliveTicker returns a ticker channel and a stop function for streaming keep-alives.
+// When interval <= 0, it returns a nil channel and a no-op stop function.
+func NewStreamingKeepAliveTicker(interval time.Duration) (<-chan time.Time, func()) {
+	keepAliveC, stop, _ := NewStreamingKeepAliveTickerWithReset(interval)
+	return keepAliveC, stop
+}
+
+// NewPreFirstTokenKeepAliveTicker returns a ticker channel and a stop function for pre-first-token SSE keep-alives.
+// It is active only when streaming.send-keepalive-before-ft is true and streaming.keepalive-seconds > 0.
+func NewPreFirstTokenKeepAliveTicker(cfg *config.SDKConfig) (<-chan time.Time, func()) {
+	if !StreamingSendKeepAliveBeforeFT(cfg) {
+		return nil, func() {}
+	}
+	return NewStreamingKeepAliveTicker(StreamingKeepAliveInterval(cfg))
+}
+
+// ContinuityKeepAliveInterval returns the keep-alive interval used only while a
+// bounded scheduler continuity wait is active.
+func ContinuityKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
+	if continuityKeepAliveIntervalOverride > 0 {
+		return continuityKeepAliveIntervalOverride
+	}
+	if interval := StreamingKeepAliveInterval(cfg); interval > 0 {
+		return interval
+	}
+	return defaultContinuityKeepAliveInterval
+}
+
+// NewContinuityKeepAliveTicker returns a ticker channel and stop function for wait-only continuity keep-alives.
+func NewContinuityKeepAliveTicker(cfg *config.SDKConfig) (<-chan time.Time, func()) {
+	interval := ContinuityKeepAliveInterval(cfg)
+	if interval <= 0 {
+		return nil, func() {}
+	}
+	if continuityKeepAliveTickerFactory != nil {
+		return continuityKeepAliveTickerFactory(interval)
+	}
+	return NewStreamingKeepAliveTicker(interval)
+}
+
+// SetContinuityKeepAliveTickerFactoryForTest overrides the wait-only continuity ticker factory for tests.
+func SetContinuityKeepAliveTickerFactoryForTest(factory func(interval time.Duration) (<-chan time.Time, func())) func() {
+	prev := continuityKeepAliveTickerFactory
+	continuityKeepAliveTickerFactory = factory
+	return func() {
+		continuityKeepAliveTickerFactory = prev
+	}
+}
+
+// SetContinuityKeepAliveIntervalForTest overrides the continuity wait keep-alive interval for tests.
+func SetContinuityKeepAliveIntervalForTest(interval time.Duration) func() {
+	prev := continuityKeepAliveIntervalOverride
+	continuityKeepAliveIntervalOverride = interval
+	return func() {
+		continuityKeepAliveIntervalOverride = prev
+	}
+}
+
+// SetStreamingKeepAliveTickerFactoryForTest overrides the keep-alive ticker factory for deterministic tests
+// and returns a restore function.
+func SetStreamingKeepAliveTickerFactoryForTest(factory func(interval time.Duration) (<-chan time.Time, func())) func() {
+	prev := streamingKeepAliveTickerFactory
+	if factory != nil {
+		streamingKeepAliveTickerFactory = factory
+	}
+	return func() {
+		streamingKeepAliveTickerFactory = prev
+	}
+}
+
+// SetStreamingKeepAliveTickerWithResetFactoryForTest overrides the keep-alive ticker-with-reset factory
+// for deterministic tests and returns a restore function.
+func SetStreamingKeepAliveTickerWithResetFactoryForTest(factory func(interval time.Duration) (<-chan time.Time, func(), func())) func() {
+	prev := streamingKeepAliveTickerWithResetFactory
+	if factory != nil {
+		streamingKeepAliveTickerWithResetFactory = factory
+	}
+	return func() {
+		streamingKeepAliveTickerWithResetFactory = prev
+	}
 }
 
 // NonStreamingKeepAliveInterval returns the keep-alive interval for non-streaming responses.
@@ -234,8 +357,14 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
 	}
+	if excludedAuthIDs := excludedAuthIDsFromContext(ctx); len(excludedAuthIDs) > 0 {
+		meta[coreexecutor.ExcludedAuthIDsMetadataKey] = excludedAuthIDs
+	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+	}
+	if finalizedFormatCallback := finalizedResponseFormatCallbackFromContext(ctx); finalizedFormatCallback != nil {
+		meta[coreexecutor.FinalizedResponseFormatCallbackMetadataKey] = finalizedFormatCallback
 	}
 	if ginCtx != nil && !websocket.IsWebSocketUpgrade(ginCtx.Request) {
 		if traceCallback := logging.GinCPATraceIDCallback(ginCtx); traceCallback != nil {
@@ -312,6 +441,28 @@ func requestCallerScope(ginCtx *gin.Context) string {
 	return coresession.CallerScope(fmt.Sprint(value))
 }
 
+func addCallerScopeMetadata(meta map[string]any, callerScope string) {
+	if meta == nil {
+		return
+	}
+	callerScope = strings.TrimSpace(callerScope)
+	if callerScope == "" {
+		return
+	}
+	meta[coreexecutor.CallerScopeMetadataKey] = callerScope
+}
+
+func callerScopeFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	value, ok := meta[coreexecutor.CallerScopeMetadataKey].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
 func addAuthSelectionModelMetadata(meta map[string]any, model string) {
 	if meta == nil {
 		return
@@ -339,11 +490,11 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 		return
 	}
 	serviceTier := coreusage.AutoServiceTier
-	node := gjson.GetBytes(rawJSON, "service_tier")
+	node := ojson.GetBytesNoCopy(rawJSON, "service_tier")
 	if node.Exists() {
 		value := strings.TrimSpace(node.String())
 		if value != "" {
-			serviceTier = value
+			serviceTier = strings.Clone(value)
 		}
 	}
 	meta[coreexecutor.ServiceTierMetadataKey] = serviceTier
@@ -355,7 +506,7 @@ func setGenerateMetadata(meta map[string]any, rawJSON []byte) {
 	}
 	// Missing or true means generation is enabled; only an explicit false disables generation.
 	generate := true
-	node := gjson.GetBytes(rawJSON, "generate")
+	node := ojson.GetBytesNoCopy(rawJSON, "generate")
 	if node.Exists() && node.IsBool() && !node.Bool() {
 		generate = false
 	}
@@ -366,6 +517,8 @@ func setGenerateMetadata(meta map[string]any, rawJSON []byte) {
 // It holds a pool of clients to interact with the backend service and manages
 // load balancing, client selection, and configuration.
 type BaseAPIHandler struct {
+	runtimeMu sync.RWMutex
+
 	// AuthManager manages auth lifecycle and execution in the new architecture.
 	AuthManager *coreauth.Manager
 
@@ -402,7 +555,34 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 // Parameters:
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
-func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
+func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) {
+	if h == nil {
+		return
+	}
+	h.runtimeMu.Lock()
+	h.Cfg = cfg
+	h.runtimeMu.Unlock()
+}
+
+// HasSchedulerContinuity reports whether the configured auth manager has an active
+// plugin scheduler supporting bounded Codex continuity.
+func (h *BaseAPIHandler) HasSchedulerContinuity() bool {
+	if h == nil || h.AuthManager == nil {
+		return false
+	}
+	return h.AuthManager.HasSchedulerContinuity()
+}
+
+// CurrentConfig returns the current application configuration snapshot.
+func (h *BaseAPIHandler) CurrentConfig() *config.SDKConfig {
+	if h == nil {
+		return nil
+	}
+	h.runtimeMu.RLock()
+	cfg := h.Cfg
+	h.runtimeMu.RUnlock()
+	return cfg
+}
 
 // SetPluginHost configures the optional plugin interceptor host.
 func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
@@ -410,10 +590,11 @@ func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
 		return
 	}
 	if isNilPluginInterceptorHost(host) {
-		h.PluginHost = nil
-		return
+		host = nil
 	}
+	h.runtimeMu.Lock()
 	h.PluginHost = host
+	h.runtimeMu.Unlock()
 }
 
 // SetModelRouterHost configures the optional plugin model router host.
@@ -422,10 +603,25 @@ func (h *BaseAPIHandler) SetModelRouterHost(host PluginModelRouterHost) {
 		return
 	}
 	if isNilPluginModelRouterHost(host) {
-		h.ModelRouterHost = nil
-		return
+		host = nil
 	}
+	h.runtimeMu.Lock()
 	h.ModelRouterHost = host
+	h.runtimeMu.Unlock()
+}
+
+// ModelRouterHostSnapshot returns the configured plugin model router host snapshot.
+func (h *BaseAPIHandler) ModelRouterHostSnapshot() PluginModelRouterHost {
+	if h == nil {
+		return nil
+	}
+	h.runtimeMu.RLock()
+	host := h.ModelRouterHost
+	h.runtimeMu.RUnlock()
+	if isNilPluginModelRouterHost(host) {
+		return nil
+	}
+	return host
 }
 
 func isNilPluginInterceptorHost(host PluginInterceptorHost) bool {
@@ -494,6 +690,17 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		requestCtx = c.Request.Context()
 	}
 
+	if requestCtx != nil {
+		parentCtx = httptransport.InheritDecorator(parentCtx, requestCtx)
+		parentCtx = logging.InheritDeferredCapture(parentCtx, requestCtx)
+	}
+	if c != nil && logging.DeferredAPICaptureFromContext(parentCtx) == nil && !logging.DeferredAPIRequestCaptureDisabled(parentCtx) {
+		if value, exists := c.Get(logging.DeferredAPIResponseContextKey); exists {
+			if capture, ok := value.(*logging.DeferredAPICapture); ok && capture != nil {
+				parentCtx = logging.WithDeferredAPICapture(parentCtx, capture)
+			}
+		}
+	}
 	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
 		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
@@ -546,12 +753,14 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		}()
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
+	newCtx = coreusage.CaptureIdentity(newCtx)
+	newCtx = coreauth.WithCodexClientRequest(newCtx, coreauth.IsCodexClientRequest(newCtx))
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
 		}
-		if h.Cfg.RequestLog && len(params) == 1 {
+		if cfg := h.CurrentConfig(); cfg != nil && cfg.RequestLog && len(params) == 1 {
 			if captured, exists := c.Get(logging.APIResponseCapturedContextKey); exists {
 				if capturedBool, ok := captured.(bool); ok && capturedBool {
 					cancel()
@@ -603,7 +812,7 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 	if h == nil || c == nil {
 		return func() {}
 	}
-	interval := NonStreamingKeepAliveInterval(h.Cfg)
+	interval := NonStreamingKeepAliveInterval(h.CurrentConfig())
 	if interval <= 0 {
 		return func() {}
 	}
